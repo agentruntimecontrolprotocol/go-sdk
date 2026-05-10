@@ -1,7 +1,6 @@
 package messages
 
 import (
-	"encoding/json"
 	"time"
 
 	"github.com/fizzpop/arcp-go"
@@ -151,22 +150,3 @@ const (
 func register(name string, factory func() arcp.MessageType) {
 	arcp.RegisterMessageType(name, factory)
 }
-
-// rawJSONOrNil returns json.RawMessage of v or nil when v is nil.
-// Useful where payloads carry an opaque "value" field.
-func rawJSONOrNil(v any) json.RawMessage {
-	if v == nil {
-		return nil
-	}
-	b, err := json.Marshal(v)
-	if err != nil {
-		return nil
-	}
-	return b
-}
-
-// noopForUnused keeps the unused-import linter satisfied for files
-// that pull in json/time only via reflection.
-var _ = json.RawMessage(nil)
-var _ = time.Time{}
-var _ = rawJSONOrNil
