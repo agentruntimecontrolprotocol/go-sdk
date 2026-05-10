@@ -10,7 +10,7 @@ test plan.
 
 ## Quickstart
 
-Requires Go 1.24 or newer.
+Requires Go 1.25 or newer (see `go.mod`).
 
 ```bash
 git clone <this repo>

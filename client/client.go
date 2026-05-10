@@ -81,8 +81,11 @@ func (c *Client) SessionID() arcp.SessionID { return c.sessionID }
 func (c *Client) Capabilities() messages.Capabilities { return c.serverCaps }
 
 // Send delivers env to the runtime. Sets env.SessionID, env.ID, and
-// env.Timestamp if unset.
-func (c *Client) Send(ctx context.Context, env arcp.Envelope) error {
+// env.Timestamp if unset. Callers receive those assignments via the pointer.
+func (c *Client) Send(ctx context.Context, env *arcp.Envelope) error {
+	if env == nil {
+		return fmt.Errorf("client.Send: nil envelope")
+	}
 	if env.ID == "" {
 		env.ID = arcp.NewMessageID()
 	}
@@ -92,7 +95,7 @@ func (c *Client) Send(ctx context.Context, env arcp.Envelope) error {
 	if env.Timestamp.IsZero() {
 		env.Timestamp = time.Now().UTC()
 	}
-	return c.t.Send(ctx, env)
+	return c.t.Send(ctx, *env)
 }
 
 // Recv waits for the next envelope from the runtime.
@@ -104,7 +107,8 @@ func (c *Client) Recv(ctx context.Context) (arcp.Envelope, error) {
 // helper used by tests and by simple clients that aren't running a
 // pending registry.
 func (c *Client) Ping(ctx context.Context, note string) (string, error) {
-	if err := c.Send(ctx, arcp.Envelope{Payload: &messages.Ping{Note: note}}); err != nil {
+	env := arcp.Envelope{Payload: &messages.Ping{Note: note}}
+	if err := c.Send(ctx, &env); err != nil {
 		return "", err
 	}
 	resp, err := c.Recv(ctx)
@@ -121,7 +125,8 @@ func (c *Client) Ping(ctx context.Context, note string) (string, error) {
 
 // Close sends session.close and shuts down the transport.
 func (c *Client) Close(ctx context.Context) error {
-	if err := c.Send(ctx, arcp.Envelope{Payload: &messages.SessionClose{Reason: "client_close"}}); err != nil {
+	closeEnv := arcp.Envelope{Payload: &messages.SessionClose{Reason: "client_close"}}
+	if err := c.Send(ctx, &closeEnv); err != nil {
 		c.logger.Warn("client.Close: session.close send failed", "error", err)
 	}
 	return c.t.Close()

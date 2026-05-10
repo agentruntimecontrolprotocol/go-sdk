@@ -84,7 +84,10 @@ func (l *EventLog) Append(ctx context.Context, env arcp.Envelope) error {
 	if err != nil {
 		return fmt.Errorf("marshal envelope: %w", err)
 	}
-	seq := l.nextSequence(env.SessionID)
+	seq, err := l.nextSequence(ctx, env.SessionID)
+	if err != nil {
+		return err
+	}
 	ts := env.Timestamp
 	if ts.IsZero() {
 		ts = time.Now().UTC()
@@ -180,24 +183,26 @@ func (l *EventLog) Count(ctx context.Context, sessionID arcp.SessionID) (int64, 
 	return n, nil
 }
 
-func (l *EventLog) nextSequence(sid arcp.SessionID) int64 {
+func (l *EventLog) nextSequence(ctx context.Context, sid arcp.SessionID) (int64, error) {
 	l.seqMu.Lock()
 	defer l.seqMu.Unlock()
 	if cur, ok := l.seq[sid]; ok {
 		cur++
 		l.seq[sid] = cur
-		return cur
+		return cur, nil
 	}
 	// Cold path: query the persisted max so we resume sequencing
-	// correctly after restart. We tolerate the query running outside
-	// any caller-supplied ctx because nextSequence is called from
-	// Append which holds its own ctx; the lookup is fast.
+	// correctly after restart.
 	var maxSeq sql.NullInt64
-	_ = l.db.QueryRow(`SELECT MAX(sequence) FROM events WHERE session_id = ?`,
+	err := l.db.QueryRowContext(ctx,
+		`SELECT MAX(sequence) FROM events WHERE session_id = ?`,
 		string(sid)).Scan(&maxSeq)
+	if err != nil {
+		return 0, fmt.Errorf("event log next sequence: %w", err)
+	}
 	cur := maxSeq.Int64 + 1
 	l.seq[sid] = cur
-	return cur
+	return cur, nil
 }
 
 // rewindSequence undoes a nextSequence reservation when an Append
