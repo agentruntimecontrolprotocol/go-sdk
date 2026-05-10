@@ -57,7 +57,7 @@ func pair(t *testing.T, opts runtime.Options) (transport.Transport, <-chan error
 // bearerVerifier returns a Verifier accepting a single token.
 func bearerVerifier(token string, principal auth.Principal) auth.Verifier {
 	return &auth.MultiVerifier{
-		BySchema: map[messages.AuthScheme]auth.Verifier{
+		ByScheme: map[messages.AuthScheme]auth.Verifier{
 			messages.AuthSchemeBearer: &auth.BearerVerifier{Tokens: map[string]auth.Principal{token: principal}},
 		},
 	}

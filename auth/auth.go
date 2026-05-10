@@ -43,12 +43,12 @@ func (AnonymousVerifier) Verify(_ context.Context, auth messages.Auth, client me
 // MultiVerifier dispatches to a per-scheme Verifier based on auth.Scheme.
 // A request whose scheme is not in the map fails with UNIMPLEMENTED.
 type MultiVerifier struct {
-	BySchema map[messages.AuthScheme]Verifier
+	ByScheme map[messages.AuthScheme]Verifier
 }
 
 // Verify implements Verifier.
 func (m *MultiVerifier) Verify(ctx context.Context, auth messages.Auth, client messages.ClientIdentity) (Principal, error) {
-	v, ok := m.BySchema[auth.Scheme]
+	v, ok := m.ByScheme[auth.Scheme]
 	if !ok {
 		return Principal{}, arcp.ErrUnimplemented.WithMessage(
 			"auth scheme not configured: " + string(auth.Scheme))

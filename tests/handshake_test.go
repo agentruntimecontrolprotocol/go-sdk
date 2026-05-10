@@ -106,7 +106,7 @@ func TestHandshakeAnonymousRejectedWithoutCapability(t *testing.T) {
 	t1, _ := pair(t, runtime.Options{
 		// Server does NOT advertise Anonymous: true.
 		Auth: &auth.MultiVerifier{
-			BySchema: map[messages.AuthScheme]auth.Verifier{
+			ByScheme: map[messages.AuthScheme]auth.Verifier{
 				messages.AuthSchemeNone: auth.AnonymousVerifier{},
 			},
 		},
