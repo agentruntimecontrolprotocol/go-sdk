@@ -8,11 +8,11 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/fizzpop/arcp-go"
-	"github.com/fizzpop/arcp-go/auth"
-	"github.com/fizzpop/arcp-go/messages"
-	"github.com/fizzpop/arcp-go/store"
-	"github.com/fizzpop/arcp-go/transport"
+	"github.com/agentruntimecontrolprotocol/go-sdk"
+	"github.com/agentruntimecontrolprotocol/go-sdk/auth"
+	"github.com/agentruntimecontrolprotocol/go-sdk/messages"
+	"github.com/agentruntimecontrolprotocol/go-sdk/store"
+	"github.com/agentruntimecontrolprotocol/go-sdk/transport"
 )
 
 // Options configures a Runtime.

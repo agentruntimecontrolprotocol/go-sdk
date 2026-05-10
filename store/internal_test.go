@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/fizzpop/arcp-go"
+	"github.com/agentruntimecontrolprotocol/go-sdk"
 )
 
 // White-box tests for store internals that the external test package

@@ -1,6 +1,6 @@
 package arcp_test
 
-import "github.com/fizzpop/arcp-go"
+import "github.com/agentruntimecontrolprotocol/go-sdk"
 
 // Test-only message types used by envelope_test.go to exercise the
 // dispatch registry without depending on the messages/ package, which

@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fizzpop/arcp-go"
+	"github.com/agentruntimecontrolprotocol/go-sdk"
 
 	// modernc.org/sqlite is a pure-Go SQLite driver; importing for
 	// side effects registers it as "sqlite" with database/sql.

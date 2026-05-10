@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/fizzpop/arcp-go/internal/ulid"
+	"github.com/agentruntimecontrolprotocol/go-sdk/internal/ulid"
 )
 
 func TestNewProducesDistinctValues(t *testing.T) {

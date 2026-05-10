@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fizzpop/arcp-go"
-	"github.com/fizzpop/arcp-go/auth"
-	"github.com/fizzpop/arcp-go/client"
-	"github.com/fizzpop/arcp-go/messages"
-	"github.com/fizzpop/arcp-go/runtime"
+	"github.com/agentruntimecontrolprotocol/go-sdk"
+	"github.com/agentruntimecontrolprotocol/go-sdk/auth"
+	"github.com/agentruntimecontrolprotocol/go-sdk/client"
+	"github.com/agentruntimecontrolprotocol/go-sdk/messages"
+	"github.com/agentruntimecontrolprotocol/go-sdk/runtime"
 )
 
 const (

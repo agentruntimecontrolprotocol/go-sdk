@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/fizzpop/arcp-go"
+	"github.com/agentruntimecontrolprotocol/go-sdk"
 )
 
 // Transport is the bidirectional envelope channel for one ARCP

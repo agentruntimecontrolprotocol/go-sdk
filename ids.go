@@ -1,6 +1,6 @@
 package arcp
 
-import "github.com/fizzpop/arcp-go/internal/ulid"
+import "github.com/agentruntimecontrolprotocol/go-sdk/internal/ulid"
 
 // SessionID identifies a single ARCP session (RFC §9). Format:
 // "sess_" + ULID.

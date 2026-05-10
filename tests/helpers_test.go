@@ -10,10 +10,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/fizzpop/arcp-go/auth"
-	"github.com/fizzpop/arcp-go/messages"
-	"github.com/fizzpop/arcp-go/runtime"
-	"github.com/fizzpop/arcp-go/transport"
+	"github.com/agentruntimecontrolprotocol/go-sdk/auth"
+	"github.com/agentruntimecontrolprotocol/go-sdk/messages"
+	"github.com/agentruntimecontrolprotocol/go-sdk/runtime"
+	"github.com/agentruntimecontrolprotocol/go-sdk/transport"
 )
 
 // silentLogger discards all logging from runtime/client during tests.

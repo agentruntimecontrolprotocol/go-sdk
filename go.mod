@@ -1,4 +1,4 @@
-module github.com/fizzpop/arcp-go
+module github.com/agentruntimecontrolprotocol/go-sdk
 
 go 1.25.0
 

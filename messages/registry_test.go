@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fizzpop/arcp-go"
-	"github.com/fizzpop/arcp-go/messages"
+	"github.com/agentruntimecontrolprotocol/go-sdk"
+	"github.com/agentruntimecontrolprotocol/go-sdk/messages"
 )
 
 // TestAllRegisteredTypesRoundTrip walks every registered type and
@@ -47,7 +47,7 @@ func TestSpecificTypePayloadRoundTrip(t *testing.T) {
 				Token:  "secret",
 			},
 			Client: messages.ClientIdentity{
-				Kind:    "claude-code",
+				Kind:    "example-client",
 				Version: "1.4.2",
 			},
 			Capabilities: messages.Capabilities{

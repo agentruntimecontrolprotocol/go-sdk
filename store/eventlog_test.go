@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fizzpop/arcp-go"
-	"github.com/fizzpop/arcp-go/store"
+	"github.com/agentruntimecontrolprotocol/go-sdk"
+	"github.com/agentruntimecontrolprotocol/go-sdk/store"
 )
 
 // Local test message type registered once per package.

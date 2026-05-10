@@ -6,7 +6,7 @@ import (
 	"io"
 	"sync"
 
-	"github.com/fizzpop/arcp-go"
+	"github.com/agentruntimecontrolprotocol/go-sdk"
 )
 
 // memoryTransport is one end of an in-memory paired transport. It is

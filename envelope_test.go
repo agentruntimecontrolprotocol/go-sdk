@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fizzpop/arcp-go"
+	"github.com/agentruntimecontrolprotocol/go-sdk"
 )
 
 const testGreeting = "hello"

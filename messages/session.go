@@ -3,7 +3,7 @@ package messages
 import (
 	"time"
 
-	"github.com/fizzpop/arcp-go"
+	"github.com/agentruntimecontrolprotocol/go-sdk"
 )
 
 // Wire type names for the session-handshake group (RFC §6.2).

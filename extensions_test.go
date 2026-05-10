@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/fizzpop/arcp-go"
+	"github.com/agentruntimecontrolprotocol/go-sdk"
 )
 
 func TestValidateExtensionType(t *testing.T) {
@@ -14,7 +14,7 @@ func TestValidateExtensionType(t *testing.T) {
 		"arcpx.example.feature.v2",
 		"arcpx.acme.workflow.beta.v3",
 		"com.acme.workflow.v2",
-		"io.fizzpop.session.close.v1",
+		"io.arcp.session.close.v1",
 	}
 	bad := []string{
 		"",

@@ -3,7 +3,7 @@ package messages
 import (
 	"time"
 
-	"github.com/fizzpop/arcp-go"
+	"github.com/agentruntimecontrolprotocol/go-sdk"
 )
 
 // AuthScheme names the credential format used in session.open /

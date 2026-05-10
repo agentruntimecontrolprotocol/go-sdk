@@ -3,8 +3,8 @@ package auth
 import (
 	"context"
 
-	"github.com/fizzpop/arcp-go"
-	"github.com/fizzpop/arcp-go/messages"
+	"github.com/agentruntimecontrolprotocol/go-sdk"
+	"github.com/agentruntimecontrolprotocol/go-sdk/messages"
 )
 
 // Principal is the verified identity of an authenticated session

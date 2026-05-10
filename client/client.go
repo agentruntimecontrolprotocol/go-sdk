@@ -6,9 +6,9 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/fizzpop/arcp-go"
-	"github.com/fizzpop/arcp-go/messages"
-	"github.com/fizzpop/arcp-go/transport"
+	"github.com/agentruntimecontrolprotocol/go-sdk"
+	"github.com/agentruntimecontrolprotocol/go-sdk/messages"
+	"github.com/agentruntimecontrolprotocol/go-sdk/transport"
 )
 
 // OpenOptions configures the session.open call.

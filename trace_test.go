@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/fizzpop/arcp-go"
+	"github.com/agentruntimecontrolprotocol/go-sdk"
 )
 
 func TestTraceContextPropagation(t *testing.T) {

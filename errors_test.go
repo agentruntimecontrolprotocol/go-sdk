@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/fizzpop/arcp-go"
+	"github.com/agentruntimecontrolprotocol/go-sdk"
 )
 
 func TestErrorString(t *testing.T) {

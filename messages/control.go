@@ -1,7 +1,7 @@
 package messages
 
 import (
-	"github.com/fizzpop/arcp-go"
+	"github.com/agentruntimecontrolprotocol/go-sdk"
 )
 
 // Wire type names for the control group (RFC §6.2).

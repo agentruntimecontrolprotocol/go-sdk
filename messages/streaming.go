@@ -3,7 +3,7 @@ package messages
 import (
 	"encoding/json"
 
-	"github.com/fizzpop/arcp-go"
+	"github.com/agentruntimecontrolprotocol/go-sdk"
 )
 
 // Wire type names for the streaming group (RFC §6.2, §11).
