@@ -21,7 +21,7 @@ type ArtifactRef struct {
 	URI        string          `json:"uri,omitempty"`
 	MediaType  string          `json:"media_type,omitempty"`
 	Size       int64           `json:"size,omitempty"`
-	Sha256     string          `json:"sha256,omitempty"`
+	SHA256     string          `json:"sha256,omitempty"`
 	ExpiresAt  time.Time       `json:"expires_at,omitempty"`
 }
 
@@ -35,7 +35,7 @@ type ArtifactPut struct {
 	ArtifactID arcp.ArtifactID `json:"artifact_id,omitempty"`
 	MediaType  string          `json:"media_type,omitempty"`
 	Data       string          `json:"data,omitempty"` // base64
-	Sha256     string          `json:"sha256,omitempty"`
+	SHA256     string          `json:"sha256,omitempty"`
 	RetentionS int             `json:"retention_seconds,omitempty"`
 }
 

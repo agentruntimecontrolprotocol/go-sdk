@@ -57,7 +57,7 @@ type StreamChunk struct {
 	Value       float64         `json:"value,omitempty"`      // for kind=metric
 	Unit        string          `json:"unit,omitempty"`       // for kind=metric
 	ContentType string          `json:"content_type,omitempty"`
-	Sha256      string          `json:"sha256,omitempty"`
+	SHA256      string          `json:"sha256,omitempty"`
 }
 
 // ARCPType returns the wire type name.
