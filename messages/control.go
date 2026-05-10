@@ -55,10 +55,10 @@ func (Nack) ARCPType() string { return TypeNack }
 
 // Cancel requests termination of a job, stream, or session (RFC §10.4).
 type Cancel struct {
-	Target     CancelTarget `json:"target"`
-	TargetID   string       `json:"target_id"`
-	Reason     string       `json:"reason,omitempty"`
-	DeadlineMS int          `json:"deadline_ms,omitempty"`
+	Target               CancelTarget `json:"target"`
+	TargetID             string       `json:"target_id"`
+	Reason               string       `json:"reason,omitempty"`
+	DeadlineMilliseconds int          `json:"deadline_ms,omitempty"`
 }
 
 // ARCPType returns the wire type name.

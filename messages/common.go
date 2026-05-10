@@ -60,23 +60,23 @@ const (
 // Capabilities is the negotiated capability set for a session
 // (RFC §7). Boolean fields default to false when absent.
 type Capabilities struct {
-	Streaming                 bool     `json:"streaming,omitempty"`
-	DurableJobs               bool     `json:"durable_jobs,omitempty"`
-	Checkpoints               bool     `json:"checkpoints,omitempty"`
-	BinaryStreams             bool     `json:"binary_streams,omitempty"`
-	AgentHandoff              bool     `json:"agent_handoff,omitempty"`
-	HumanInput                bool     `json:"human_input,omitempty"`
-	Artifacts                 bool     `json:"artifacts,omitempty"`
-	Subscriptions             bool     `json:"subscriptions,omitempty"`
-	ScheduledJobs             bool     `json:"scheduled_jobs,omitempty"`
-	Anonymous                 bool     `json:"anonymous,omitempty"`
-	Interrupt                 bool     `json:"interrupt,omitempty"`
-	HeartbeatIntervalSeconds  int      `json:"heartbeat_interval_seconds,omitempty"`
-	HeartbeatRecovery         string   `json:"heartbeat_recovery,omitempty"` // "fail" | "block"
-	BinaryEncoding            []string `json:"binary_encoding,omitempty"`    // "base64" | "sidecar"
-	ArtifactRetentionDefaultS int      `json:"artifact_retention_default_seconds,omitempty"`
-	ArtifactRetentionMaxS     int      `json:"artifact_retention_max_seconds,omitempty"`
-	Extensions                []string `json:"extensions,omitempty"`
+	Streaming                       bool     `json:"streaming,omitempty"`
+	DurableJobs                     bool     `json:"durable_jobs,omitempty"`
+	Checkpoints                     bool     `json:"checkpoints,omitempty"`
+	BinaryStreams                   bool     `json:"binary_streams,omitempty"`
+	AgentHandoff                    bool     `json:"agent_handoff,omitempty"`
+	HumanInput                      bool     `json:"human_input,omitempty"`
+	Artifacts                       bool     `json:"artifacts,omitempty"`
+	Subscriptions                   bool     `json:"subscriptions,omitempty"`
+	ScheduledJobs                   bool     `json:"scheduled_jobs,omitempty"`
+	Anonymous                       bool     `json:"anonymous,omitempty"`
+	Interrupt                       bool     `json:"interrupt,omitempty"`
+	HeartbeatIntervalSeconds        int      `json:"heartbeat_interval_seconds,omitempty"`
+	HeartbeatRecovery               string   `json:"heartbeat_recovery,omitempty"` // "fail" | "block"
+	BinaryEncoding                  []string `json:"binary_encoding,omitempty"`    // "base64" | "sidecar"
+	ArtifactRetentionDefaultSeconds int      `json:"artifact_retention_default_seconds,omitempty"`
+	ArtifactRetentionMaxSeconds     int      `json:"artifact_retention_max_seconds,omitempty"`
+	Extensions                      []string `json:"extensions,omitempty"`
 }
 
 // Lease is the materialized form of a granted permission (RFC §15.5).

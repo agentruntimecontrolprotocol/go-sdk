@@ -101,9 +101,9 @@ func (JobProgress) ARCPType() string { return TypeJobProgress }
 // monotonically per job; deadline_ms tells the receiver how long until
 // the next heartbeat is overdue.
 type JobHeartbeat struct {
-	Sequence   int      `json:"sequence"`
-	DeadlineMS int      `json:"deadline_ms"`
-	State      JobState `json:"state"`
+	Sequence             int      `json:"sequence"`
+	DeadlineMilliseconds int      `json:"deadline_ms"`
+	State                JobState `json:"state"`
 }
 
 // ARCPType returns the wire type name.
@@ -149,9 +149,9 @@ func (JobCancelled) ARCPType() string { return TypeJobCancelled }
 // JobScheduleWhen specifies when a scheduled job should execute
 // (RFC §10.6). Exactly one of At, Every, After is required.
 type JobScheduleWhen struct {
-	At       time.Time `json:"at,omitempty"`
-	Every    string    `json:"every,omitempty"` // RFC 5545 RRULE
-	AfterSec int       `json:"after,omitempty"` // seconds
+	At           time.Time `json:"at,omitempty"`
+	Every        string    `json:"every,omitempty"` // RFC 5545 RRULE
+	AfterSeconds int       `json:"after,omitempty"`
 }
 
 // JobSchedule requests deferred or recurring execution (RFC §10.6).
