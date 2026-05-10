@@ -1,0 +1,11 @@
+{
+  "arcp": "1.0",
+  "id": "msg_01ABC",
+  "type": "test.ping",
+  "timestamp": "2026-05-09T13:00:00Z",
+  "session_id": "sess_01",
+  "priority": "normal",
+  "payload": {
+    "greeting": "hello"
+  }
+}

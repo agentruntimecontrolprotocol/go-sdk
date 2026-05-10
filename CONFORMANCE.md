@@ -10,9 +10,9 @@ Status legend:
 
 | RFC Section                              | Status      | Notes                                           |
 | ---------------------------------------- | ----------- | ----------------------------------------------- |
-| §6.1 Envelope                            | Pending     | Phase 1                                         |
-| §6.4 Delivery semantics / idempotency    | Pending     | Phase 1 (event log dedup)                       |
-| §6.5 Priority and QoS                    | Pending     | Phase 1 (priority field), full scheduling later |
+| §6.1 Envelope                            | Implemented | Custom JSON dispatch, 91.7% coverage            |
+| §6.4 Delivery semantics / idempotency    | Implemented | SQLite event log w/ unique (session_id, id)     |
+| §6.5 Priority and QoS                    | Partial     | Field carried; scheduling deferred              |
 | §7 Capability negotiation                | Pending     | Phase 2                                         |
 | §8 Authentication: bearer                | Pending     | Phase 2                                         |
 | §8 Authentication: signed_jwt            | Pending     | Phase 2                                         |
@@ -40,11 +40,11 @@ Status legend:
 | §15.6 Trust elevation                    | Deferred    | v0.2                                            |
 | §16 Artifacts (inline base64)            | Pending     | Phase 5                                         |
 | §17 Observability (log/metric/trace)     | Pending     | Phase 1+ (logging via slog)                     |
-| §18 Error model                          | Pending     | Phase 1                                         |
-| §19 Resumability (after_message_id only) | Pending     | Phase 5                                         |
+| §18 Error model                          | Implemented | Full taxonomy, sentinels, errors.Is/As support  |
+| §19 Resumability (after_message_id only) | Partial     | Event log Replay(after) ready; runtime in P5    |
 | §19 Checkpoint-based resume              | Deferred    | v0.2                                            |
 | §20 MCP compatibility                    | Deferred    | v0.2 (out-of-scope wrappers)                    |
-| §21 Extensions                           | Pending     | Phase 1                                         |
+| §21 Extensions                           | Implemented | Namespace validation; registry; unknown-msg in P2 |
 | §22 Transport: WebSocket                 | Pending     | Phase 6                                         |
 | §22 Transport: stdio                     | Pending     | Phase 6                                         |
 | §22 Transport: HTTP/2                    | Deferred    | v0.2                                            |
