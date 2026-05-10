@@ -1,0 +1,57 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - errorlint
+    - govet
+    - staticcheck
+    - revive
+    - gosec
+    - gocritic
+    - unused
+    - ineffassign
+    - misspell
+    - unconvert
+    - gocyclo
+    - goconst
+    - nilerr
+    - nolintlint
+    - wastedassign
+    - gocheckcompilerdirectives
+    - exhaustive
+    - bodyclose
+    - contextcheck
+    - durationcheck
+  settings:
+    errorlint:
+      errorf: true
+      asserts: true
+      comparison: true
+    revive:
+      rules:
+        - name: package-comments
+        - name: exported
+        - name: var-naming
+        - name: error-return
+        - name: error-naming
+    exhaustive:
+      default-signifies-exhaustive: true
+    gocyclo:
+      min-complexity: 15
+    gosec:
+      excludes:
+        # G404 — math/rand is fine for non-crypto jitter; we use crypto/rand where it matters.
+        - G404
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+formatters:
+  enable:
+    - gofmt

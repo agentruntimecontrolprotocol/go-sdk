@@ -1,0 +1,15 @@
+# Build artifacts
+coverage.out
+*.test
+*.out
+arcp
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Go workspace (if introduced later)
+go.work
+go.work.sum
