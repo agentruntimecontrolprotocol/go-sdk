@@ -3,6 +3,7 @@ package arcp
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 )
@@ -314,6 +315,6 @@ func RegisteredMessageTypes() []string {
 	for k := range messageRegistry {
 		out = append(out, k)
 	}
-	sortStrings(out)
+	slices.Sort(out)
 	return out
 }

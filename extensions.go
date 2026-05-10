@@ -3,6 +3,7 @@ package arcp
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -110,17 +111,6 @@ func (r *ExtensionRegistry) List() []string {
 		out = append(out, k)
 	}
 	// Stable order (alphabetical) keeps tests deterministic.
-	sortStrings(out)
+	slices.Sort(out)
 	return out
-}
-
-// sortStrings is a tiny insertion sort to avoid pulling in sort just
-// for short slices. ExtensionRegistry typically holds a handful of
-// entries.
-func sortStrings(s []string) {
-	for i := 1; i < len(s); i++ {
-		for j := i; j > 0 && s[j-1] > s[j]; j-- {
-			s[j-1], s[j] = s[j], s[j-1]
-		}
-	}
 }
