@@ -1,0 +1,84 @@
+# CI for go-sdk
+#
+# Action pinning strategy:
+#   - First-party `actions/*` actions are pinned to a major version tag
+#     (e.g. `@v4`). GitHub maintains these and rotates the tag forward
+#     within the major version for security fixes.
+#   - Third-party actions (none currently used) MUST be pinned to a full
+#     commit SHA with a `# vX.Y.Z` trailing comment.
+#
+# Go version matrix is derived from the `go` directive in go.mod
+# (floor) and the latest stable release published by the Go team.
+name: test
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".gitignore"
+      - ".editorconfig"
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".gitignore"
+      - ".editorconfig"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Floor: `go` directive from go.mod (1.25.x). Ceiling: latest stable.
+        go: ["1.25.x", "stable"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Go ${{ matrix.go }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+
+      - name: Download modules
+        run: go mod download
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: gofmt drift check
+        run: gofmt -l . | tee /dev/stderr | (! read -r)
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test (race)
+        run: go test -v -race ./... 2>&1 | tee test-output.txt
+        shell: bash
+
+      - name: Upload test output on failure
+        if: failure() && hashFiles('test-output.txt') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-output-go-${{ matrix.go }}
+          path: test-output.txt
+          retention-days: 7
+          if-no-files-found: ignore
