@@ -94,28 +94,36 @@ func (r *Runtime) handshake(ctx context.Context, t transport.Transport) (*sessio
 	}
 	open, ok := env.Payload.(*messages.SessionOpen)
 	if !ok {
-		_ = r.sendReject(ctx, t, env, arcp.CodeFailedPrecondition,
-			"first message must be session.open")
+		if sendErr := r.sendReject(ctx, t, env, arcp.CodeFailedPrecondition,
+			"first message must be session.open"); sendErr != nil {
+			r.opts.Logger.Warn("handshake reject send failed", "error", sendErr)
+		}
 		return nil, arcp.NewError(arcp.CodeFailedPrecondition,
 			fmt.Sprintf("handshake: first message was %s, want session.open", env.Type()))
 	}
 
 	// Anonymous gating (RFC §4.6 / §8.2).
 	if open.Auth.Scheme == messages.AuthSchemeNone && !r.opts.Capabilities.Anonymous {
-		_ = r.sendUnauthenticated(ctx, t, env, arcp.CodeUnauthenticated,
-			"anonymous capability not advertised by this runtime")
+		if sendErr := r.sendUnauthenticated(ctx, t, env, arcp.CodeUnauthenticated,
+			"anonymous capability not advertised by this runtime"); sendErr != nil {
+			r.opts.Logger.Warn("handshake unauthenticated send failed", "error", sendErr)
+		}
 		return nil, arcp.ErrUnauthenticated.WithMessage("anonymous not negotiated")
 	}
 
 	principal, err := r.opts.Auth.Verify(ctx, open.Auth, open.Client)
 	if err != nil {
-		_ = r.sendUnauthenticated(ctx, t, env, arcp.Code(err), err.Error())
+		if sendErr := r.sendUnauthenticated(ctx, t, env, arcp.Code(err), err.Error()); sendErr != nil {
+			r.opts.Logger.Warn("handshake unauthenticated send failed", "error", sendErr)
+		}
 		return nil, err
 	}
 
 	negotiated, err := negotiateCapabilities(open.Capabilities, r.opts.Capabilities)
 	if err != nil {
-		_ = r.sendReject(ctx, t, env, arcp.Code(err), err.Error())
+		if sendErr := r.sendReject(ctx, t, env, arcp.Code(err), err.Error()); sendErr != nil {
+			r.opts.Logger.Warn("handshake reject send failed", "error", sendErr)
+		}
 		return nil, err
 	}
 

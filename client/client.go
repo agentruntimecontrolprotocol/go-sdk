@@ -121,6 +121,8 @@ func (c *Client) Ping(ctx context.Context, note string) (string, error) {
 
 // Close sends session.close and shuts down the transport.
 func (c *Client) Close(ctx context.Context) error {
-	_ = c.Send(ctx, arcp.Envelope{Payload: &messages.SessionClose{Reason: "client_close"}})
+	if err := c.Send(ctx, arcp.Envelope{Payload: &messages.SessionClose{Reason: "client_close"}}); err != nil {
+		c.logger.Warn("client.Close: session.close send failed", "error", err)
+	}
 	return c.t.Close()
 }
