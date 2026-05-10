@@ -13,16 +13,16 @@ Status legend:
 | §6.1 Envelope                            | Implemented | Custom JSON dispatch, 91.7% coverage            |
 | §6.4 Delivery semantics / idempotency    | Implemented | SQLite event log w/ unique (session_id, id)     |
 | §6.5 Priority and QoS                    | Partial     | Field carried; scheduling deferred              |
-| §7 Capability negotiation                | Pending     | Phase 2                                         |
-| §8 Authentication: bearer                | Pending     | Phase 2                                         |
-| §8 Authentication: signed_jwt            | Pending     | Phase 2                                         |
-| §8 Authentication: none (anonymous)      | Pending     | Phase 2 (gated on capability)                   |
+| §7 Capability negotiation                | Implemented | Boolean intersection + extension AND-must-match |
+| §8 Authentication: bearer                | Implemented | auth.BearerVerifier with token map              |
+| §8 Authentication: signed_jwt            | Deferred    | Pushed to v0.2 (challenge flow not implemented) |
+| §8 Authentication: none (anonymous)      | Implemented | auth.AnonymousVerifier; gated on capability     |
 | §8 Authentication: mtls                  | Deferred    | v0.2                                            |
 | §8 Authentication: oauth2                | Deferred    | v0.2                                            |
-| §8.4 Re-authentication                   | Pending     | Phase 2                                         |
-| §8.5 Eviction                            | Pending     | Phase 2                                         |
-| §9 Sessions: stateless                   | Pending     | Phase 2                                         |
-| §9 Sessions: stateful                    | Pending     | Phase 2                                         |
+| §8.4 Re-authentication                   | Deferred    | session.refresh round-trip pending v0.2         |
+| §8.5 Eviction                            | Partial     | Message defined; runtime emits not yet wired up |
+| §9 Sessions: stateless                   | Implemented | runtime.Runtime serves session over Transport   |
+| §9 Sessions: stateful                    | Partial     | Per-session state in handshake; durable in v0.2 |
 | §9 Sessions: durable                     | Deferred    | v0.2                                            |
 | §10.2 Job state machine                  | Pending     | Phase 3                                         |
 | §10.3 Heartbeats                         | Pending     | Phase 3                                         |
