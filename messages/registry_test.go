@@ -14,7 +14,6 @@ import (
 func TestAllRegisteredTypesRoundTrip(t *testing.T) {
 	t.Parallel()
 	for _, typeName := range arcp.RegisteredMessageTypes() {
-		typeName := typeName
 		t.Run(typeName, func(t *testing.T) {
 			t.Parallel()
 			env := arcp.Envelope{
