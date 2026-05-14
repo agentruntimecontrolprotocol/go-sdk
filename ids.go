@@ -1,83 +1,66 @@
 package arcp
 
-import "github.com/agentruntimecontrolprotocol/go-sdk/internal/ulid"
+import (
+	"crypto/rand"
+	"fmt"
+	"time"
 
-// SessionID identifies a single ARCP session (RFC §9). Format:
-// "sess_" + ULID.
-type SessionID string
+	"github.com/google/uuid"
+	"github.com/oklog/ulid/v2"
+)
 
-// MessageID is the transport idempotency key carried in
-// envelope.id (RFC §6.1.1, §6.4). Format: "msg_" + ULID.
-type MessageID string
+// NewEnvelopeID returns a UUIDv7. UUIDv7 carries a millisecond
+// timestamp prefix and is suitable for the envelope id field.
+func NewEnvelopeID() string {
+	id, err := uuid.NewV7()
+	if err != nil {
+		// uuid.NewV7 only errors when the entropy source fails;
+		// fall back to a v4 rather than panic on a transient.
+		id = uuid.New()
+	}
+	return id.String()
+}
 
-// JobID identifies a durable job (RFC §10). Format: "job_" + ULID.
-type JobID string
+// NewULID returns a Crockford-base32 ULID with the current wall-clock
+// timestamp. ULIDs sort lexicographically; we use them for
+// session/job/result/nonce identifiers so log scans stay ordered.
+func NewULID() string {
+	return ulid.MustNew(ulid.Timestamp(time.Now()), ulid.DefaultEntropy()).String()
+}
 
-// StreamID identifies an open stream (RFC §11). Format: "str_" + ULID.
-type StreamID string
+// NewSessionID returns a ULID prefixed with "sess_".
+func NewSessionID() string {
+	return "sess_" + NewULID()
+}
 
-// SubscriptionID identifies an observer subscription (RFC §13).
-// Format: "sub_" + ULID.
-type SubscriptionID string
+// NewJobID returns a ULID prefixed with "job_".
+func NewJobID() string {
+	return "job_" + NewULID()
+}
 
-// TraceID is a stable id for one user-visible request or workflow
-// (RFC §6.1.1, §17.1). Format: "trace_" + ULID.
-type TraceID string
+// NewResultID returns a ULID prefixed with "res_".
+func NewResultID() string {
+	return "res_" + NewULID()
+}
 
-// SpanID identifies a single span within a trace tree (RFC §17.1).
-// Format: "span_" + ULID.
-type SpanID string
+// NewPingNonce returns a ULID prefixed with "p_". The nonce is matched
+// on session.pong; ULIDs are short and time-ordered.
+func NewPingNonce() string {
+	return "p_" + NewULID()
+}
 
-// ArtifactID identifies a stored artifact (RFC §16). Format:
-// "art_" + ULID.
-type ArtifactID string
+// NewCallID returns a ULID prefixed with "c_" for tool_call.call_id.
+func NewCallID() string {
+	return "c_" + NewULID()
+}
 
-// LeaseID identifies a granted permission lease (RFC §15.5). Format:
-// "lease_" + ULID.
-type LeaseID string
-
-// CheckpointID identifies a job checkpoint (RFC §10.1). Format:
-// "chk_" + ULID.
-type CheckpointID string
-
-// String returns the id as a plain string.
-func (s SessionID) String() string      { return string(s) }
-func (m MessageID) String() string      { return string(m) }
-func (j JobID) String() string          { return string(j) }
-func (s StreamID) String() string       { return string(s) }
-func (s SubscriptionID) String() string { return string(s) }
-func (t TraceID) String() string        { return string(t) }
-func (s SpanID) String() string         { return string(s) }
-func (a ArtifactID) String() string     { return string(a) }
-func (l LeaseID) String() string        { return string(l) }
-func (c CheckpointID) String() string   { return string(c) }
-
-// NewSessionID generates a fresh session id.
-func NewSessionID() SessionID { return SessionID("sess_" + ulid.New()) }
-
-// NewMessageID generates a fresh message id.
-func NewMessageID() MessageID { return MessageID("msg_" + ulid.New()) }
-
-// NewJobID generates a fresh job id.
-func NewJobID() JobID { return JobID("job_" + ulid.New()) }
-
-// NewStreamID generates a fresh stream id.
-func NewStreamID() StreamID { return StreamID("str_" + ulid.New()) }
-
-// NewSubscriptionID generates a fresh subscription id.
-func NewSubscriptionID() SubscriptionID { return SubscriptionID("sub_" + ulid.New()) }
-
-// NewTraceID generates a fresh trace id.
-func NewTraceID() TraceID { return TraceID("trace_" + ulid.New()) }
-
-// NewSpanID generates a fresh span id.
-func NewSpanID() SpanID { return SpanID("span_" + ulid.New()) }
-
-// NewArtifactID generates a fresh artifact id.
-func NewArtifactID() ArtifactID { return ArtifactID("art_" + ulid.New()) }
-
-// NewLeaseID generates a fresh lease id.
-func NewLeaseID() LeaseID { return LeaseID("lease_" + ulid.New()) }
-
-// NewCheckpointID generates a fresh checkpoint id.
-func NewCheckpointID() CheckpointID { return CheckpointID("chk_" + ulid.New()) }
+// NewTraceID returns a 32-character lowercase hex string suitable for
+// the envelope trace_id field (matches W3C trace-context).
+func NewTraceID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// rand.Read failure is fatal but we degrade rather than panic.
+		return fmt.Sprintf("%032x", time.Now().UnixNano())
+	}
+	return fmt.Sprintf("%032x", b)
+}

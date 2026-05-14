@@ -1,0 +1,26 @@
+/*
+ * Copyright (c) 2026 The ARCP Authors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+digraph LeaseBudget {
+    graph [rankdir=LR, fontname=Helvetica, bgcolor=transparent];
+    node  [shape=box, style=rounded, fontname=Helvetica];
+
+    op       [label="validateLeaseOp(now, cap, target)", style="rounded,filled", fillcolor="#3B82F6", fontcolor=white];
+    glob     [label="capability glob match?", shape=diamond];
+    expiry   [label="now < expires_at?", shape=diamond];
+    budget   [label="all counters > 0?", shape=diamond];
+    proceed  [label="proceed; debit on cost.* metrics", style="rounded,filled", fillcolor="#F59E0B", fontcolor=white];
+
+    deny     [label="PERMISSION_DENIED (§9.3)"];
+    expired  [label="LEASE_EXPIRED (§9.5)"];
+    broke    [label="BUDGET_EXHAUSTED (§9.6)"];
+
+    op       -> glob;
+    glob     -> expiry  [label="yes"];
+    glob     -> deny    [label="no"];
+    expiry   -> budget  [label="yes"];
+    expiry   -> expired [label="no"];
+    budget   -> proceed [label="yes"];
+    budget   -> broke   [label="no"];
+}

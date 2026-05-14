@@ -1,12 +1,22 @@
 package arcp
 
-// ProtocolVersion is the ARCP protocol revision implemented by this package.
-// It is the value placed in the envelope's `arcp` field (RFC §6.1.1).
-const ProtocolVersion = "1.0"
+// ProtocolVersion is the literal value carried in every envelope's
+// "arcp" field.
+const ProtocolVersion = "1"
 
-// ImplVersion is the semantic version of this Go implementation. It is
-// distinct from ProtocolVersion: protocol revisions are coordinated across
-// implementations, while ImplVersion tracks bug fixes and additions to this
-// codebase. Used in `client.kind`/`runtime.kind` identity blocks (RFC §8.2,
-// §8.3).
-const ImplVersion = "0.1.0"
+// SDKVersion is the version of this Go SDK.
+const SDKVersion = "1.0.0"
+
+// Features is the canonical list of negotiable feature flags advertised
+// in session.hello and session.welcome capabilities.
+var Features = []string{
+	"heartbeat",
+	"ack",
+	"list_jobs",
+	"subscribe",
+	"agent_versions",
+	"lease_expires_at",
+	"cost.budget",
+	"progress",
+	"result_chunk",
+}

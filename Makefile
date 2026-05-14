@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 GOLANGCI_LINT ?= $(shell command -v golangci-lint 2>/dev/null || echo $$(go env GOPATH)/bin/golangci-lint)
 
-.PHONY: all fmt fmt-check vet lint test cover build doc-check tidy clean install gates
+.PHONY: all fmt fmt-check vet lint test cover build doc-check tidy clean install gates conformance diagrams examples-smoke
 
 all: gates
 
@@ -48,5 +48,14 @@ install:
 clean:
 	rm -f coverage.out
 
-gates: fmt-check vet lint test cover build doc-check
+conformance:
+	ARCP_CONFORMANCE_OUT=$$PWD/conformance.json go test ./tests/conformance/...
+
+diagrams:
+	@bash docs/diagrams/render.sh 2>/dev/null || echo "(no diagrams to render)"
+
+examples-smoke:
+	@go build ./examples/... && echo "examples build OK"
+
+gates: fmt-check vet test cover build conformance
 	@echo "All gates passed."

@@ -2,132 +2,326 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"log/slog"
-	"time"
+	"sync"
+	"sync/atomic"
 
-	"github.com/agentruntimecontrolprotocol/go-sdk"
+	arcp "github.com/agentruntimecontrolprotocol/go-sdk"
 	"github.com/agentruntimecontrolprotocol/go-sdk/messages"
 	"github.com/agentruntimecontrolprotocol/go-sdk/transport"
 )
 
-// OpenOptions configures the session.open call.
-type OpenOptions struct {
-	Auth         messages.Auth
-	Client       messages.ClientIdentity
-	Capabilities messages.Capabilities
-	Logger       *slog.Logger
-}
-
-// Client is an active ARCP client wrapping a single open session
-// (RFC §9). Construct one via Open.
+// Client is the client-side view of one ARCP session. Construct with
+// Connect.
 type Client struct {
-	t          transport.Transport
-	sessionID  arcp.SessionID
-	serverCaps messages.Capabilities
-	logger     *slog.Logger
+	opts      Options
+	transport transport.Transport
+	sessionID string
+	welcome   *messages.SessionWelcome
+	features  []string
+
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	mu          sync.RWMutex
+	handles     map[string]*JobHandle
+	pending     []*JobHandle
+	subscribers map[string]*Subscription
+	listReqs    map[string]chan *messages.SessionJobs
+
+	wg sync.WaitGroup
+
+	highSeq atomic.Uint64
+	lastAck atomic.Uint64
 }
 
-// Open performs the four-step handshake (RFC §8.1) and returns a
-// connected Client. v0.1 supports the no-challenge happy path; if the
-// runtime returns a session.challenge, Open returns UNIMPLEMENTED so
-// the caller knows to wire up signed_jwt challenge handling (deferred
-// to v0.2).
-func Open(ctx context.Context, t transport.Transport, opts OpenOptions) (*Client, error) {
-	if opts.Logger == nil {
-		opts.Logger = slog.Default()
-	}
-	open := arcp.Envelope{
-		ID:        arcp.NewMessageID(),
-		Timestamp: time.Now().UTC(),
-		Payload: &messages.SessionOpen{
-			Auth:         opts.Auth,
-			Client:       opts.Client,
-			Capabilities: opts.Capabilities,
+// Connect performs a session.hello / session.welcome handshake on t
+// and returns a connected Client.
+func Connect(ctx context.Context, t transport.Transport, opts Options) (*Client, error) {
+	o := opts.withDefaults()
+	hello := messages.SessionHello{
+		Client: messages.ClientInfo{Name: o.ClientName, Version: o.ClientVersion},
+		Auth:   messages.AuthInfo{Scheme: "bearer", Token: o.Token},
+		Capabilities: messages.HelloCapabilities{
+			Encodings: []string{"json"},
+			Features:  o.Features,
 		},
 	}
-	if err := t.Send(ctx, open); err != nil {
-		return nil, fmt.Errorf("client.Open: send session.open: %w", err)
+	env, err := arcp.NewEnvelope(messages.TypeSessionHello, &hello)
+	if err != nil {
+		return nil, err
+	}
+	if err := t.Send(ctx, env); err != nil {
+		return nil, fmt.Errorf("send hello: %w", err)
 	}
 	resp, err := t.Recv(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("client.Open: receive handshake response: %w", err)
+		return nil, fmt.Errorf("await welcome: %w", err)
 	}
-	switch p := resp.Payload.(type) {
-	case *messages.SessionAccepted:
-		return &Client{
-			t:          t,
-			sessionID:  p.SessionID,
-			serverCaps: p.Capabilities,
-			logger:     opts.Logger,
-		}, nil
-	case *messages.SessionRejected:
-		return nil, arcp.NewError(p.Code, p.Message)
-	case *messages.SessionUnauthenticated:
-		return nil, arcp.ErrUnauthenticated.WithMessage(p.Message)
-	case *messages.SessionChallenge:
-		return nil, arcp.ErrUnimplemented.WithMessage(
-			"client.Open: session.challenge handling deferred to v0.2")
+	switch resp.Type {
+	case messages.TypeSessionWelcome:
+	case messages.TypeSessionError:
+		var serr messages.SessionError
+		_ = resp.DecodePayload(&serr)
+		return nil, &arcp.Error{Code: serr.Code, Message: serr.Message, Retryable: serr.Retryable, Details: serr.Details}
 	default:
-		return nil, arcp.NewError(arcp.CodeFailedPrecondition,
-			fmt.Sprintf("client.Open: unexpected response %s", resp.Type()))
+		return nil, arcp.ErrInvalidRequest.WithMessage("expected session.welcome, got " + resp.Type)
 	}
+	var welcome messages.SessionWelcome
+	if err := resp.DecodePayload(&welcome); err != nil {
+		return nil, err
+	}
+	cctx, cancel := context.WithCancel(ctx)
+	c := &Client{
+		opts:        o,
+		transport:   t,
+		sessionID:   resp.SessionID,
+		welcome:     &welcome,
+		features:    arcp.IntersectFeatures(o.Features, welcome.Capabilities.Features),
+		ctx:         cctx,
+		cancel:      cancel,
+		handles:     map[string]*JobHandle{},
+		subscribers: map[string]*Subscription{},
+		listReqs:    map[string]chan *messages.SessionJobs{},
+	}
+	c.wg.Add(1)
+	go c.readLoop()
+	return c, nil
 }
 
-// SessionID returns the id assigned by the runtime in session.accepted.
-func (c *Client) SessionID() arcp.SessionID { return c.sessionID }
+// SessionID returns the negotiated session identifier.
+func (c *Client) SessionID() string { return c.sessionID }
 
-// Capabilities returns the negotiated capability set.
-func (c *Client) Capabilities() messages.Capabilities { return c.serverCaps }
+// Welcome returns the welcome payload received from the runtime.
+func (c *Client) Welcome() *messages.SessionWelcome { return c.welcome }
 
-// Send delivers env to the runtime. Sets env.SessionID, env.ID, and
-// env.Timestamp if unset. Callers receive those assignments via the pointer.
-func (c *Client) Send(ctx context.Context, env *arcp.Envelope) error {
-	if env == nil {
-		return fmt.Errorf("client.Send: nil envelope")
-	}
-	if env.ID == "" {
-		env.ID = arcp.NewMessageID()
-	}
-	if env.SessionID == "" {
-		env.SessionID = c.sessionID
-	}
-	if env.Timestamp.IsZero() {
-		env.Timestamp = time.Now().UTC()
-	}
-	return c.t.Send(ctx, *env)
-}
+// Features returns the effective negotiated feature set.
+func (c *Client) Features() []string { return c.features }
 
-// Recv waits for the next envelope from the runtime.
-func (c *Client) Recv(ctx context.Context) (arcp.Envelope, error) {
-	return c.t.Recv(ctx)
-}
+// HasFeature reports whether name was negotiated.
+func (c *Client) HasFeature(name string) bool { return arcp.HasFeature(c.features, name) }
 
-// Ping sends a ping and waits for the matching pong. Convenience
-// helper used by tests and by simple clients that aren't running a
-// pending registry.
-func (c *Client) Ping(ctx context.Context, note string) (string, error) {
-	env := arcp.Envelope{Payload: &messages.Ping{Note: note}}
-	if err := c.Send(ctx, &env); err != nil {
-		return "", err
-	}
-	resp, err := c.Recv(ctx)
-	if err != nil {
-		return "", err
-	}
-	pong, ok := resp.Payload.(*messages.Pong)
-	if !ok {
-		return "", arcp.NewError(arcp.CodeFailedPrecondition,
-			fmt.Sprintf("ping: expected pong, got %s", resp.Type()))
-	}
-	return pong.Note, nil
-}
-
-// Close sends session.close and shuts down the transport.
+// Close terminates the session.
 func (c *Client) Close(ctx context.Context) error {
-	closeEnv := arcp.Envelope{Payload: &messages.SessionClose{Reason: "client_close"}}
-	if err := c.Send(ctx, &closeEnv); err != nil {
-		c.logger.Warn("client.Close: session.close send failed", "error", err)
+	env, _ := arcp.NewEnvelope(messages.TypeSessionBye, &messages.SessionBye{Reason: "client close"})
+	env.SessionID = c.sessionID
+	_ = c.transport.Send(ctx, env)
+	c.cancel()
+	err := c.transport.Close()
+	c.wg.Wait()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, h := range c.handles {
+		h.fail(arcp.ErrInternalError.WithMessage("client closed"))
 	}
-	return c.t.Close()
+	for _, s := range c.subscribers {
+		s.close(arcp.ErrInternalError.WithMessage("client closed"))
+	}
+	return err
+}
+
+// readLoop consumes envelopes and dispatches them to handles /
+// subscribers / list waiters.
+func (c *Client) readLoop() {
+	defer c.wg.Done()
+	for {
+		env, err := c.transport.Recv(c.ctx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return
+			}
+			c.failAll(err)
+			return
+		}
+		if env.EventSeq > 0 {
+			c.highSeq.Store(env.EventSeq)
+		}
+		c.dispatch(env)
+	}
+}
+
+func (c *Client) failAll(err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, h := range c.handles {
+		h.fail(err)
+	}
+	for _, h := range c.pending {
+		h.fail(err)
+	}
+	c.pending = nil
+	for _, s := range c.subscribers {
+		s.close(err)
+	}
+}
+
+func (c *Client) dispatch(env arcp.Envelope) {
+	switch env.Type {
+	case messages.TypeSessionPing:
+		c.handlePing(env)
+	case messages.TypeSessionPong:
+		// best-effort; nothing to do
+	case messages.TypeSessionError:
+		var serr messages.SessionError
+		_ = env.DecodePayload(&serr)
+		c.failAll(&arcp.Error{Code: serr.Code, Message: serr.Message, Retryable: serr.Retryable})
+	case messages.TypeSessionJobs:
+		c.handleSessionJobs(env)
+	case messages.TypeJobAccepted:
+		c.handleJobAccepted(env)
+	case messages.TypeJobEvent:
+		c.handleJobEvent(env)
+	case messages.TypeJobResult, messages.TypeJobError:
+		c.handleJobTerminal(env)
+	case messages.TypeJobSubscribed:
+		c.handleJobSubscribed(env)
+	}
+	c.maybeAck()
+}
+
+func (c *Client) handlePing(env arcp.Envelope) {
+	var ping messages.SessionPing
+	_ = env.DecodePayload(&ping)
+	out, err := arcp.NewEnvelope(messages.TypeSessionPong, &messages.SessionPong{
+		PingNonce: ping.Nonce,
+	})
+	if err != nil {
+		return
+	}
+	out.SessionID = c.sessionID
+	_ = c.transport.Send(c.ctx, out)
+}
+
+func (c *Client) handleSessionJobs(env arcp.Envelope) {
+	var jobs messages.SessionJobs
+	if err := env.DecodePayload(&jobs); err != nil {
+		return
+	}
+	c.mu.Lock()
+	ch, ok := c.listReqs[jobs.RequestID]
+	if ok {
+		delete(c.listReqs, jobs.RequestID)
+	}
+	c.mu.Unlock()
+	if ok {
+		select {
+		case ch <- &jobs:
+		default:
+		}
+	}
+}
+
+func (c *Client) handleJobAccepted(env arcp.Envelope) {
+	var acc messages.JobAccepted
+	if err := env.DecodePayload(&acc); err != nil {
+		return
+	}
+	c.mu.Lock()
+	var h *JobHandle
+	if existing, ok := c.handles[acc.JobID]; ok {
+		h = existing
+	} else if len(c.pending) > 0 {
+		h = c.pending[0]
+		c.pending = c.pending[1:]
+		c.handles[acc.JobID] = h
+	}
+	c.mu.Unlock()
+	if h != nil {
+		h.accept(acc)
+	}
+}
+
+func (c *Client) handleJobEvent(env arcp.Envelope) {
+	var ev messages.JobEvent
+	if err := env.DecodePayload(&ev); err != nil {
+		return
+	}
+	c.mu.RLock()
+	h := c.handles[env.JobID]
+	c.mu.RUnlock()
+	if h != nil {
+		h.pushEvent(ev)
+	}
+	c.mu.RLock()
+	subs := append([]*Subscription(nil), c.subscribersFor(env.JobID)...)
+	c.mu.RUnlock()
+	for _, s := range subs {
+		s.push(ev)
+	}
+}
+
+func (c *Client) subscribersFor(jobID string) []*Subscription {
+	var out []*Subscription
+	for _, s := range c.subscribers {
+		if s.jobID == jobID {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func (c *Client) handleJobTerminal(env arcp.Envelope) {
+	c.mu.RLock()
+	h := c.handles[env.JobID]
+	subs := append([]*Subscription(nil), c.subscribersFor(env.JobID)...)
+	c.mu.RUnlock()
+	switch env.Type {
+	case messages.TypeJobResult:
+		var r messages.JobResult
+		_ = env.DecodePayload(&r)
+		if h != nil {
+			h.finish(&r, nil)
+		}
+		for _, s := range subs {
+			s.close(nil)
+		}
+	case messages.TypeJobError:
+		var jerr messages.JobError
+		_ = env.DecodePayload(&jerr)
+		e := &arcp.Error{Code: jerr.Code, Message: jerr.Message, Retryable: jerr.Retryable, Details: jerr.Details}
+		if h != nil {
+			h.finish(nil, e)
+		}
+		for _, s := range subs {
+			s.close(e)
+		}
+	}
+}
+
+func (c *Client) handleJobSubscribed(env arcp.Envelope) {
+	var sub messages.JobSubscribed
+	if err := env.DecodePayload(&sub); err != nil {
+		return
+	}
+	c.mu.RLock()
+	subs := append([]*Subscription(nil), c.subscribersFor(sub.JobID)...)
+	c.mu.RUnlock()
+	for _, s := range subs {
+		s.acknowledged(sub)
+	}
+}
+
+func (c *Client) maybeAck() {
+	if !c.HasFeature("ack") || c.opts.AutoAckWindow == 0 {
+		return
+	}
+	current := c.highSeq.Load()
+	last := c.lastAck.Load()
+	if current-last < c.opts.AutoAckWindow {
+		return
+	}
+	if c.lastAck.CompareAndSwap(last, current) {
+		go c.sendAck(current)
+	}
+}
+
+func (c *Client) sendAck(seq uint64) {
+	body := messages.SessionAck{LastProcessedSeq: seq}
+	env, err := arcp.NewEnvelope(messages.TypeSessionAck, &body)
+	if err != nil {
+		return
+	}
+	env.SessionID = c.sessionID
+	_ = c.transport.Send(c.ctx, env)
 }

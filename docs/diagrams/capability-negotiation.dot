@@ -1,0 +1,16 @@
+/*
+ * Copyright (c) 2026 The ARCP Authors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+digraph CapabilityNegotiation {
+    graph [rankdir=LR, fontname=Helvetica, bgcolor=transparent];
+    node  [shape=box, style=rounded, fontname=Helvetica];
+
+    client [label="client", style="rounded,filled", fillcolor="#3B82F6", fontcolor=white];
+    runtime [label="runtime", style="rounded,filled", fillcolor="#F59E0B", fontcolor=white];
+    note   [label="effective features =\nintersect(hello, welcome)", shape=note];
+
+    client  -> runtime [label="session.hello\n{features:[...]}"];
+    runtime -> client  [label="session.welcome\n{features:[...], agents:[...]}"];
+    client  -> note    [style=dashed];
+}

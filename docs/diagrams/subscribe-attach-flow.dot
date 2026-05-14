@@ -1,0 +1,20 @@
+/*
+ * Copyright (c) 2026 The ARCP Authors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+digraph SubscribeAttachFlow {
+    graph [rankdir=LR, fontname=Helvetica, bgcolor=transparent];
+    node  [shape=box, style=rounded, fontname=Helvetica];
+
+    C2 [label="dashboard session C2", style="rounded,filled", fillcolor="#3B82F6", fontcolor=white];
+    R  [label="runtime", style="rounded,filled", fillcolor="#F59E0B", fontcolor=white];
+    C1 [label="owner session C1"];
+
+    C2 -> R  [label="session.list_jobs (§6.6)"];
+    R  -> C2 [label="session.jobs"];
+    C2 -> R  [label="job.subscribe (§7.6)"];
+    R  -> C2 [label="job.subscribed"];
+    R  -> C2 [label="job.event*"];
+    C1 -> R  [label="job.event* (still emitting)"];
+    C2 -> R  [label="job.cancel\n→ PERMISSION_DENIED (§7.6)", style=dashed];
+}

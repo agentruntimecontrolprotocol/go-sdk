@@ -5,82 +5,55 @@ import (
 	"fmt"
 )
 
-// ErrorCode is the canonical error code taxonomy defined in RFC §18.2.
-// Implementations MUST use these codes when applicable; deployment-
-// specific codes MUST be namespaced (e.g. "arcpx.acme.QUOTA_EXCEEDED").
+// ErrorCode is the canonical string code for the protocol's error
+// taxonomy. The fifteen codes below cover every spec-mandated rejection
+// point.
 type ErrorCode string
 
-// Canonical error codes (RFC §18.2). The string values are the wire
-// representation.
+// The full set of canonical error codes.
 const (
-	CodeOK                   ErrorCode = "OK"
-	CodeCancelled            ErrorCode = "CANCELLED"
-	CodeUnknown              ErrorCode = "UNKNOWN"
-	CodeInvalidArgument      ErrorCode = "INVALID_ARGUMENT"
-	CodeDeadlineExceeded     ErrorCode = "DEADLINE_EXCEEDED"
-	CodeNotFound             ErrorCode = "NOT_FOUND"
-	CodeAlreadyExists        ErrorCode = "ALREADY_EXISTS"
-	CodePermissionDenied     ErrorCode = "PERMISSION_DENIED"
-	CodeResourceExhausted    ErrorCode = "RESOURCE_EXHAUSTED"
-	CodeFailedPrecondition   ErrorCode = "FAILED_PRECONDITION"
-	CodeAborted              ErrorCode = "ABORTED"
-	CodeOutOfRange           ErrorCode = "OUT_OF_RANGE"
-	CodeUnimplemented        ErrorCode = "UNIMPLEMENTED"
-	CodeInternal             ErrorCode = "INTERNAL"
-	CodeUnavailable          ErrorCode = "UNAVAILABLE"
-	CodeDataLoss             ErrorCode = "DATA_LOSS"
-	CodeUnauthenticated      ErrorCode = "UNAUTHENTICATED"
-	CodeHeartbeatLost        ErrorCode = "HEARTBEAT_LOST"
-	CodeLeaseExpired         ErrorCode = "LEASE_EXPIRED"
-	CodeLeaseRevoked         ErrorCode = "LEASE_REVOKED"
-	CodeBackpressureOverflow ErrorCode = "BACKPRESSURE_OVERFLOW"
+	CodePermissionDenied         ErrorCode = "PERMISSION_DENIED"
+	CodeLeaseSubsetViolation     ErrorCode = "LEASE_SUBSET_VIOLATION"
+	CodeJobNotFound              ErrorCode = "JOB_NOT_FOUND"
+	CodeDuplicateKey             ErrorCode = "DUPLICATE_KEY"
+	CodeAgentNotAvailable        ErrorCode = "AGENT_NOT_AVAILABLE"
+	CodeAgentVersionNotAvailable ErrorCode = "AGENT_VERSION_NOT_AVAILABLE"
+	CodeCancelled                ErrorCode = "CANCELLED"
+	CodeTimeout                  ErrorCode = "TIMEOUT"
+	CodeResumeWindowExpired      ErrorCode = "RESUME_WINDOW_EXPIRED"
+	CodeHeartbeatLost            ErrorCode = "HEARTBEAT_LOST"
+	CodeLeaseExpired             ErrorCode = "LEASE_EXPIRED"
+	CodeBudgetExhausted          ErrorCode = "BUDGET_EXHAUSTED"
+	CodeInvalidRequest           ErrorCode = "INVALID_REQUEST"
+	CodeUnauthenticated          ErrorCode = "UNAUTHENTICATED"
+	CodeInternalError            ErrorCode = "INTERNAL_ERROR"
 )
 
-// Error is the structured error type used throughout this
-// implementation (RFC §18.1). Wraps a cause via Unwrap so
-// errors.Is/As/Unwrap work as expected.
+// Error is the structured ARCP error. It carries a code, a human
+// message, a retry hint, optional structured details, and an
+// optional wrapped cause.
 type Error struct {
-	// Code is the canonical or namespaced error code.
-	Code ErrorCode
-	// Message is a human-readable description; optional but recommended.
-	Message string
-	// Retryable indicates whether the operation MAY succeed on retry.
-	// Defaults are filled in by NewError per RFC §18.3.
-	Retryable bool
-	// Details carries free-form key/value details, e.g.
-	// {"retry_after_seconds": 30}.
-	Details map[string]any
-	// Cause is the wrapped error (chained per RFC §18.1).
-	Cause error
+	Code      ErrorCode      `json:"code"`
+	Message   string         `json:"message"`
+	Retryable bool           `json:"retryable"`
+	Details   map[string]any `json:"details,omitempty"`
+	cause     error
 }
 
-// Error implements the standard library's error interface.
+// Error implements the error interface.
 func (e *Error) Error() string {
-	if e == nil {
-		return "<nil arcp.Error>"
+	if e.Message == "" {
+		return string(e.Code)
 	}
-	if e.Cause != nil {
-		return fmt.Sprintf("arcp: [%s] %s: %v", e.Code, e.Message, e.Cause)
-	}
-	return fmt.Sprintf("arcp: [%s] %s", e.Code, e.Message)
+	return fmt.Sprintf("%s: %s", e.Code, e.Message)
 }
 
-// Unwrap returns the wrapped cause for compatibility with errors.Unwrap.
-func (e *Error) Unwrap() error {
-	if e == nil {
-		return nil
-	}
-	return e.Cause
-}
+// Unwrap returns the wrapped cause, if any.
+func (e *Error) Unwrap() error { return e.cause }
 
-// Is implements the matching protocol used by errors.Is. Two
-// arcp.Errors match when their Codes are equal. Sentinels declared in
-// this package compare on Code only; concrete details are inspected via
-// errors.As.
+// Is matches by Code so wrapped errors satisfy errors.Is against
+// sentinel values.
 func (e *Error) Is(target error) bool {
-	if e == nil {
-		return target == nil
-	}
 	var t *Error
 	if !errors.As(target, &t) {
 		return false
@@ -88,123 +61,93 @@ func (e *Error) Is(target error) bool {
 	return e.Code == t.Code
 }
 
-// WithCause returns a copy of e with Cause set.
+// WithCause returns a copy of e wrapping cause.
 func (e *Error) WithCause(cause error) *Error {
-	if e == nil {
-		return nil
-	}
 	c := *e
-	c.Cause = cause
+	c.cause = cause
 	return &c
 }
 
-// WithMessage returns a copy of e with the given message.
+// WithMessage returns a copy of e with msg as the human message.
 func (e *Error) WithMessage(msg string) *Error {
-	if e == nil {
-		return nil
-	}
 	c := *e
 	c.Message = msg
 	return &c
 }
 
-// WithDetails returns a copy of e with the given details merged in.
-// The original details map (if any) is not mutated.
+// WithDetails returns a copy of e with details merged into Details.
 func (e *Error) WithDetails(details map[string]any) *Error {
-	if e == nil {
-		return nil
-	}
 	c := *e
-	merged := make(map[string]any, len(e.Details)+len(details))
-	for k, v := range e.Details {
-		merged[k] = v
+	if c.Details == nil {
+		c.Details = map[string]any{}
 	}
 	for k, v := range details {
-		merged[k] = v
+		c.Details[k] = v
 	}
-	c.Details = merged
 	return &c
 }
 
-// NewError constructs an Error with the given code and message.
-// Retryable is initialized from DefaultRetryable(code).
-func NewError(code ErrorCode, msg string) *Error {
-	return &Error{Code: code, Message: msg, Retryable: DefaultRetryable(code)}
+// Sentinel error values. Each maps to one ErrorCode. Use errors.Is
+// against these to test for a particular code.
+var (
+	ErrPermissionDenied         = &Error{Code: CodePermissionDenied, Message: "permission denied", Retryable: false}
+	ErrLeaseSubsetViolation     = &Error{Code: CodeLeaseSubsetViolation, Message: "lease subset violation", Retryable: false}
+	ErrJobNotFound              = &Error{Code: CodeJobNotFound, Message: "job not found", Retryable: false}
+	ErrDuplicateKey             = &Error{Code: CodeDuplicateKey, Message: "duplicate idempotency key", Retryable: false}
+	ErrAgentNotAvailable        = &Error{Code: CodeAgentNotAvailable, Message: "agent not available", Retryable: false}
+	ErrAgentVersionNotAvailable = &Error{Code: CodeAgentVersionNotAvailable, Message: "agent version not available", Retryable: false}
+	ErrCancelled                = &Error{Code: CodeCancelled, Message: "cancelled", Retryable: false}
+	ErrTimeout                  = &Error{Code: CodeTimeout, Message: "timeout", Retryable: false}
+	ErrResumeWindowExpired      = &Error{Code: CodeResumeWindowExpired, Message: "resume window expired", Retryable: false}
+	ErrHeartbeatLost            = &Error{Code: CodeHeartbeatLost, Message: "heartbeat lost", Retryable: true}
+	ErrLeaseExpired             = &Error{Code: CodeLeaseExpired, Message: "lease expired", Retryable: false}
+	ErrBudgetExhausted          = &Error{Code: CodeBudgetExhausted, Message: "budget exhausted", Retryable: false}
+	ErrInvalidRequest           = &Error{Code: CodeInvalidRequest, Message: "invalid request", Retryable: false}
+	ErrUnauthenticated          = &Error{Code: CodeUnauthenticated, Message: "unauthenticated", Retryable: false}
+	ErrInternalError            = &Error{Code: CodeInternalError, Message: "internal error", Retryable: true}
+)
+
+// Code walks the error chain and returns the first matched ErrorCode.
+// If no *Error is found, Code returns CodeInternalError.
+func Code(err error) ErrorCode {
+	if err == nil {
+		return ""
+	}
+	var e *Error
+	if errors.As(err, &e) {
+		return e.Code
+	}
+	return CodeInternalError
 }
 
-// DefaultRetryable returns the default retryability for a code per
-// RFC §18.3.
-func DefaultRetryable(code ErrorCode) bool {
+// IsRetryable reports whether err is structurally marked retryable.
+// Non-arcp errors are conservatively reported as retryable so generic
+// transport-level failures do not become fatal.
+func IsRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	var e *Error
+	if errors.As(err, &e) {
+		return e.Retryable
+	}
+	return true
+}
+
+// Newf constructs an *Error with code and a formatted message.
+func Newf(code ErrorCode, format string, args ...any) *Error {
+	return &Error{
+		Code:      code,
+		Message:   fmt.Sprintf(format, args...),
+		Retryable: defaultRetryable(code),
+	}
+}
+
+func defaultRetryable(code ErrorCode) bool {
 	switch code {
-	case CodeResourceExhausted, CodeUnavailable, CodeDeadlineExceeded, CodeInternal, CodeAborted:
+	case CodeInternalError, CodeHeartbeatLost:
 		return true
 	default:
 		return false
 	}
 }
-
-// IsRetryable returns true if err (or any wrapped arcp.Error in its
-// chain) reports Retryable. Non-arcp errors return false.
-func IsRetryable(err error) bool {
-	var e *Error
-	if errors.As(err, &e) {
-		return e.Retryable
-	}
-	return false
-}
-
-// Code returns the ErrorCode of err if err is or wraps an arcp.Error,
-// or CodeUnknown otherwise.
-func Code(err error) ErrorCode {
-	var e *Error
-	if errors.As(err, &e) {
-		return e.Code
-	}
-	if err == nil {
-		return CodeOK
-	}
-	return CodeUnknown
-}
-
-// Sentinel errors. Use errors.Is to compare. Each sentinel is a
-// distinct *Error keyed on its canonical Code.
-var (
-	// ErrUnauthenticated indicates missing or invalid credentials
-	// (RFC §18.2).
-	ErrUnauthenticated = &Error{Code: CodeUnauthenticated, Message: "unauthenticated"}
-	// ErrPermissionDenied indicates the caller lacks the required
-	// permission or lease (RFC §15, §18.2).
-	ErrPermissionDenied = &Error{Code: CodePermissionDenied, Message: "permission denied"}
-	// ErrLeaseExpired indicates an operation attempted with an expired
-	// lease (RFC §15.5).
-	ErrLeaseExpired = &Error{Code: CodeLeaseExpired, Message: "lease expired"}
-	// ErrLeaseRevoked indicates an operation attempted with a revoked
-	// lease (RFC §15.5).
-	ErrLeaseRevoked = &Error{Code: CodeLeaseRevoked, Message: "lease revoked"}
-	// ErrUnimplemented indicates the runtime does not support the
-	// requested feature (RFC §18.2). v0.1 returns this for deferred
-	// surfaces (mtls, oauth2, sidecar binary, scheduled jobs, etc.).
-	ErrUnimplemented = &Error{Code: CodeUnimplemented, Message: "not implemented in this runtime"}
-	// ErrDeadlineExceeded indicates an operation timed out
-	// (RFC §18.2). Retryable by default.
-	ErrDeadlineExceeded = &Error{Code: CodeDeadlineExceeded, Message: "deadline exceeded", Retryable: true}
-	// ErrCancelled indicates the operation was cancelled
-	// (RFC §10.4, §18.2).
-	ErrCancelled = &Error{Code: CodeCancelled, Message: "cancelled"}
-	// ErrNotFound indicates a referenced entity does not exist
-	// (RFC §18.2).
-	ErrNotFound = &Error{Code: CodeNotFound, Message: "not found"}
-	// ErrAlreadyExists indicates an entity creation conflicted
-	// (RFC §18.2). Used for duplicate envelope ids in the event log.
-	ErrAlreadyExists = &Error{Code: CodeAlreadyExists, Message: "already exists"}
-	// ErrInvalidArgument indicates a malformed argument (RFC §18.2).
-	ErrInvalidArgument = &Error{Code: CodeInvalidArgument, Message: "invalid argument"}
-	// ErrInternal indicates an internal runtime error (RFC §18.2).
-	ErrInternal = &Error{Code: CodeInternal, Message: "internal error", Retryable: true}
-	// ErrBackpressureOverflow indicates a stream or subscription was
-	// dropped due to overflow (RFC §18.2).
-	ErrBackpressureOverflow = &Error{Code: CodeBackpressureOverflow, Message: "backpressure overflow"}
-	// ErrHeartbeatLost indicates a job missed required heartbeats
-	// (RFC §10.3, §18.2).
-	ErrHeartbeatLost = &Error{Code: CodeHeartbeatLost, Message: "heartbeat lost"}
-)

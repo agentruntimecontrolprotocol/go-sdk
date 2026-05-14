@@ -1,0 +1,24 @@
+/*
+ * Copyright (c) 2026 The ARCP Authors
+ * Licensed under the Apache License, Version 2.0.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+digraph JobLifecycle {
+    graph [rankdir=TB, fontname=Helvetica, bgcolor=transparent];
+    node  [shape=box, style=rounded, fontname=Helvetica];
+
+    pending   [label="pending", style="rounded,filled", fillcolor="#3B82F6", fontcolor=white];
+    running   [label="running", style="rounded,filled", fillcolor="#F59E0B", fontcolor=white];
+    success   [label="success"];
+    error     [label="error"];
+    cancelled [label="cancelled"];
+    timed_out [label="timed_out"];
+
+    pending   -> running   [label="job.accepted (§7.1)"];
+    running   -> success   [label="job.result (§7.3)"];
+    running   -> error     [label="job.error (§7.3)"];
+    running   -> cancelled [label="job.cancel (§7.4)"];
+    running   -> timed_out [label="max_runtime_sec (§7.3)"];
+    running   -> error     [label="LEASE_EXPIRED (§9.5)"];
+    running   -> error     [label="BUDGET_EXHAUSTED (§9.6)"];
+}

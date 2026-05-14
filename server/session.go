@@ -1,0 +1,471 @@
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	arcp "github.com/agentruntimecontrolprotocol/go-sdk"
+	"github.com/agentruntimecontrolprotocol/go-sdk/internal/clock"
+	"github.com/agentruntimecontrolprotocol/go-sdk/internal/eventlog"
+	"github.com/agentruntimecontrolprotocol/go-sdk/internal/idstore"
+	"github.com/agentruntimecontrolprotocol/go-sdk/messages"
+	"github.com/agentruntimecontrolprotocol/go-sdk/transport"
+)
+
+// session wraps one connected client.
+type session struct {
+	srv       *Server
+	id        string
+	principal string
+	transport transport.Transport
+	features  []string
+	clientCap messages.HelloCapabilities
+
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	outbox chan arcp.Envelope
+	wg     sync.WaitGroup
+
+	seqMu sync.Mutex
+	seq   uint64
+
+	highMu sync.Mutex
+	high   uint64 // last_processed_seq from session.ack
+
+	heartbeatLost atomic.Bool
+}
+
+func (srv *Server) handshake(ctx context.Context, t transport.Transport) (*session, error) {
+	env, err := t.Recv(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("await hello: %w", err)
+	}
+	if env.Type != messages.TypeSessionHello {
+		return nil, arcp.ErrInvalidRequest.WithMessage("first envelope must be session.hello, got " + env.Type)
+	}
+	var hello messages.SessionHello
+	if err := env.DecodePayload(&hello); err != nil {
+		return nil, err
+	}
+	var principal string
+	if srv.opts.Verifier != nil {
+		p, err := srv.opts.Verifier.Verify(ctx, hello.Auth.Token)
+		if err != nil {
+			_ = sendSessionError(ctx, t, "", arcp.CodeUnauthenticated, err.Error())
+			return nil, err
+		}
+		principal = p
+	} else {
+		principal = hello.Client.Name
+	}
+	sessionID := arcp.NewSessionID()
+	feats := arcp.IntersectFeatures(srv.features(), hello.Capabilities.Features)
+	welcome := messages.SessionWelcome{
+		Runtime:              messages.RuntimeInfo{Name: srv.opts.Name, Version: srv.opts.Version},
+		ResumeToken:          arcp.NewULID(),
+		ResumeWindowSec:      int(srv.opts.ResumeWindow / time.Second),
+		HeartbeatIntervalSec: int(srv.opts.HeartbeatInterval / time.Second),
+		Capabilities: messages.WelcomeCapabilities{
+			Encodings: []string{"json"},
+			Features:  feats,
+			Agents:    srv.inventory(),
+		},
+	}
+	wenv, err := arcp.NewEnvelope(messages.TypeSessionWelcome, &welcome)
+	if err != nil {
+		return nil, err
+	}
+	wenv.SessionID = sessionID
+	if err := t.Send(ctx, wenv); err != nil {
+		return nil, fmt.Errorf("send welcome: %w", err)
+	}
+	sctx, cancel := context.WithCancel(ctx)
+	s := &session{
+		srv:       srv,
+		id:        sessionID,
+		principal: principal,
+		transport: t,
+		features:  feats,
+		clientCap: hello.Capabilities,
+		ctx:       sctx,
+		cancel:    cancel,
+		outbox:    make(chan arcp.Envelope, 128),
+	}
+	return s, nil
+}
+
+func sendSessionError(ctx context.Context, t transport.Transport, sessionID string, code arcp.ErrorCode, msg string) error {
+	body := messages.SessionError{Code: code, Message: msg, Retryable: code == arcp.CodeInternalError}
+	env, err := arcp.NewEnvelope(messages.TypeSessionError, &body)
+	if err != nil {
+		return err
+	}
+	env.SessionID = sessionID
+	return t.Send(ctx, env)
+}
+
+func (s *session) hasFeature(name string) bool {
+	return arcp.HasFeature(s.features, name)
+}
+
+// nextSeq allocates the next session-scoped event_seq.
+func (s *session) nextSeq() uint64 {
+	s.seqMu.Lock()
+	defer s.seqMu.Unlock()
+	s.seq++
+	return s.seq
+}
+
+// currentSeq returns the most recently allocated seq without consuming
+// one.
+func (s *session) currentSeq() uint64 {
+	s.seqMu.Lock()
+	defer s.seqMu.Unlock()
+	return s.seq
+}
+
+// send enqueues env on the outbox.
+func (s *session) send(env arcp.Envelope) {
+	env.SessionID = s.id
+	select {
+	case s.outbox <- env:
+	case <-s.ctx.Done():
+	}
+}
+
+// writeLoop drains outbox; one writer per session.
+func (s *session) writeLoop() {
+	defer s.wg.Done()
+	for {
+		select {
+		case env, ok := <-s.outbox:
+			if !ok {
+				return
+			}
+			if err := s.transport.Send(s.ctx, env); err != nil {
+				if !errors.Is(err, context.Canceled) {
+					s.srv.opts.Logger.Debug("send envelope failed", "err", err, "type", env.Type)
+				}
+				return
+			}
+			s.recordOutbound(env)
+		case <-s.ctx.Done():
+			return
+		}
+	}
+}
+
+func (s *session) recordOutbound(env arcp.Envelope) {
+	if env.EventSeq == 0 {
+		return
+	}
+	_ = s.srv.log.Append(eventlog.Entry{
+		SessionID: s.id,
+		EventSeq:  env.EventSeq,
+		JobID:     env.JobID,
+		StoredAt:  s.srv.opts.Clock.Now(),
+		Envelope:  env,
+	})
+}
+
+// run drives the read loop. Returns when the session ends.
+func (s *session) run(ctx context.Context) error {
+	s.wg.Add(1)
+	go s.writeLoop()
+
+	defer func() {
+		s.cancel()
+		close(s.outbox)
+		s.wg.Wait()
+		_ = s.transport.Close()
+	}()
+
+	// Outbound heartbeat ticker.
+	var heartbeatTimer clock.Timer
+	if s.hasFeature("heartbeat") && s.srv.opts.HeartbeatInterval > 0 {
+		heartbeatTimer = s.srv.opts.Clock.AfterFunc(s.srv.opts.HeartbeatInterval, s.sendPing)
+		defer heartbeatTimer.Stop()
+	}
+	// Inbound heartbeat watchdog.
+	var watchdog clock.Timer
+	if s.hasFeature("heartbeat") && s.srv.opts.HeartbeatInterval > 0 {
+		watchdog = s.srv.opts.Clock.AfterFunc(2*s.srv.opts.HeartbeatInterval, func() {
+			s.heartbeatLost.Store(true)
+			s.cancel()
+		})
+		defer watchdog.Stop()
+	}
+
+	for {
+		env, err := s.transport.Recv(s.ctx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return nil
+			}
+			return err
+		}
+		if watchdog != nil {
+			watchdog.Reset(2 * s.srv.opts.HeartbeatInterval)
+		}
+		if heartbeatTimer != nil {
+			heartbeatTimer.Reset(s.srv.opts.HeartbeatInterval)
+		}
+		if err := s.dispatch(s.ctx, env); err != nil {
+			s.srv.opts.Logger.Debug("dispatch failed", "type", env.Type, "err", err)
+		}
+	}
+}
+
+func (s *session) sendPing() {
+	if !s.hasFeature("heartbeat") {
+		return
+	}
+	ping := messages.SessionPing{
+		Nonce:  arcp.NewPingNonce(),
+		SentAt: s.srv.opts.Clock.Now(),
+	}
+	env, err := arcp.NewEnvelope(messages.TypeSessionPing, &ping)
+	if err != nil {
+		return
+	}
+	s.send(env)
+}
+
+func (s *session) dispatch(ctx context.Context, env arcp.Envelope) error {
+	switch env.Type {
+	case messages.TypeSessionPing:
+		return s.handlePing(env)
+	case messages.TypeSessionPong:
+		return nil
+	case messages.TypeSessionAck:
+		return s.handleAck(env)
+	case messages.TypeSessionListJobs:
+		return s.handleListJobs(ctx, env)
+	case messages.TypeSessionBye:
+		s.cancel()
+		return nil
+	case messages.TypeJobSubmit:
+		return s.handleJobSubmit(ctx, env)
+	case messages.TypeJobCancel:
+		return s.handleJobCancel(env)
+	case messages.TypeJobSubscribe:
+		return s.handleJobSubscribe(ctx, env)
+	case messages.TypeJobUnsubscribe:
+		return s.handleJobUnsubscribe(env)
+	default:
+		return s.sendError(arcp.CodeInvalidRequest, "unknown envelope type "+env.Type)
+	}
+}
+
+func (s *session) sendError(code arcp.ErrorCode, msg string) error {
+	body := messages.SessionError{Code: code, Message: msg, Retryable: code == arcp.CodeInternalError}
+	env, err := arcp.NewEnvelope(messages.TypeSessionError, &body)
+	if err != nil {
+		return err
+	}
+	s.send(env)
+	return nil
+}
+
+func (s *session) handlePing(env arcp.Envelope) error {
+	var ping messages.SessionPing
+	if err := env.DecodePayload(&ping); err != nil {
+		return err
+	}
+	pong := messages.SessionPong{PingNonce: ping.Nonce, ReceivedAt: s.srv.opts.Clock.Now()}
+	out, err := arcp.NewEnvelope(messages.TypeSessionPong, &pong)
+	if err != nil {
+		return err
+	}
+	s.send(out)
+	return nil
+}
+
+func (s *session) handleAck(env arcp.Envelope) error {
+	if !s.hasFeature("ack") {
+		return s.sendError(arcp.CodeInvalidRequest, "ack feature not negotiated")
+	}
+	var ack messages.SessionAck
+	if err := env.DecodePayload(&ack); err != nil {
+		return err
+	}
+	s.highMu.Lock()
+	if ack.LastProcessedSeq > s.high {
+		s.high = ack.LastProcessedSeq
+	}
+	s.highMu.Unlock()
+	_ = s.srv.log.Trim(s.id, ack.LastProcessedSeq)
+	return nil
+}
+
+func (s *session) handleListJobs(ctx context.Context, env arcp.Envelope) error {
+	if !s.hasFeature("list_jobs") {
+		return s.sendError(arcp.CodeInvalidRequest, "list_jobs feature not negotiated")
+	}
+	var req messages.SessionListJobs
+	if err := env.DecodePayload(&req); err != nil {
+		return err
+	}
+	jobs, next, err := s.srv.listJobs(s.principal, req.Filter, req.Limit, req.Cursor)
+	if err != nil {
+		return s.sendError(arcp.CodeInternalError, err.Error())
+	}
+	resp := messages.SessionJobs{
+		RequestID:  env.ID,
+		Jobs:       jobs,
+		NextCursor: next,
+	}
+	out, err := arcp.NewEnvelope(messages.TypeSessionJobs, &resp)
+	if err != nil {
+		return err
+	}
+	s.send(out)
+	return nil
+}
+
+func (s *session) handleJobSubmit(ctx context.Context, env arcp.Envelope) error {
+	var req messages.JobSubmit
+	if err := env.DecodePayload(&req); err != nil {
+		return s.sendError(arcp.CodeInvalidRequest, err.Error())
+	}
+	ref, err := messages.ParseAgentRef(req.Agent)
+	if err != nil {
+		return s.sendError(arcp.CodeInvalidRequest, err.Error())
+	}
+	fn, canonical, err := s.srv.resolveAgent(ref)
+	if err != nil {
+		return s.sendError(arcp.Code(err), err.Error())
+	}
+	if req.LeaseConstraints != nil && req.LeaseConstraints.ExpiresAt != nil {
+		if !req.LeaseConstraints.ExpiresAt.After(s.srv.opts.Clock.Now()) {
+			return s.sendError(arcp.CodeInvalidRequest, "lease_constraints.expires_at must be in the future")
+		}
+	}
+	job := newJob(s, canonical, req, fn, env.TraceID)
+	if !s.srv.registerJob(job) {
+		return s.sendError(arcp.CodeInternalError, "job id collision")
+	}
+	if req.IdempotencyKey != "" {
+		entry, fresh, err := s.srv.idStore.PutIfAbsent(ctx, idstore.Entry{
+			Principal: s.principal,
+			Key:       req.IdempotencyKey,
+			JobID:     job.id,
+			CreatedAt: s.srv.opts.Clock.Now(),
+		})
+		if err == nil && !fresh {
+			s.srv.unregisterJob(job.id)
+			return s.sendError(arcp.CodeDuplicateKey, "idempotency key already used for job "+entry.JobID)
+		}
+	}
+	accept := messages.JobAccepted{
+		JobID:            job.id,
+		Lease:            job.lease.Lease(),
+		LeaseConstraints: leaseConstraintsFromState(job.lease.ExpiresAt()),
+		Budget:           job.lease.Initial(),
+		AcceptedAt:       s.srv.opts.Clock.Now(),
+		TraceID:          job.traceID,
+		Agent:            canonical,
+	}
+	aenv, err := arcp.NewEnvelope(messages.TypeJobAccepted, &accept)
+	if err != nil {
+		return err
+	}
+	aenv.JobID = job.id
+	aenv.TraceID = job.traceID
+	s.send(aenv)
+	go job.run()
+	return nil
+}
+
+func leaseConstraintsFromState(t *time.Time) *messages.LeaseConstraints {
+	if t == nil {
+		return nil
+	}
+	return &messages.LeaseConstraints{ExpiresAt: t}
+}
+
+func (s *session) handleJobCancel(env arcp.Envelope) error {
+	var req messages.JobCancel
+	_ = env.DecodePayload(&req)
+	job := s.srv.lookupJob(env.JobID)
+	if job == nil {
+		return s.sendError(arcp.CodeJobNotFound, "job "+env.JobID+" not found")
+	}
+	if job.session != s {
+		return s.sendError(arcp.CodePermissionDenied, "only the submitting session can cancel")
+	}
+	job.cancelWithReason(req.Reason)
+	return nil
+}
+
+func (s *session) handleJobSubscribe(ctx context.Context, env arcp.Envelope) error {
+	if !s.hasFeature("subscribe") {
+		return s.sendError(arcp.CodeInvalidRequest, "subscribe feature not negotiated")
+	}
+	var req messages.JobSubscribe
+	if err := env.DecodePayload(&req); err != nil {
+		return err
+	}
+	job := s.srv.lookupJob(req.JobID)
+	if job == nil {
+		return s.sendError(arcp.CodeJobNotFound, "job "+req.JobID+" not found")
+	}
+	if job.principal != s.principal {
+		return s.sendError(arcp.CodePermissionDenied, "subscription denied by deployment policy")
+	}
+	sub := newSubscription(s, req.JobID)
+	s.srv.addSubscriber(req.JobID, sub)
+	subscribed := messages.JobSubscribed{
+		JobID:          job.id,
+		CurrentStatus:  job.status(),
+		Agent:          job.agent,
+		Lease:          job.lease.Lease(),
+		TraceID:        job.traceID,
+		SubscribedFrom: s.currentSeq(),
+		Replayed:       req.History,
+	}
+	out, err := arcp.NewEnvelope(messages.TypeJobSubscribed, &subscribed)
+	if err != nil {
+		return err
+	}
+	out.JobID = job.id
+	s.send(out)
+	if req.History {
+		// Replay buffered events under the subscriber's seq space.
+		entries, _ := s.srv.log.SinceJob(job.id, req.FromEventSeq)
+		for _, e := range entries {
+			replay := e.Envelope
+			replay.EventSeq = s.nextSeq()
+			s.send(replay)
+		}
+	}
+	return nil
+}
+
+func (s *session) handleJobUnsubscribe(env arcp.Envelope) error {
+	var req messages.JobUnsubscribe
+	if err := env.DecodePayload(&req); err != nil {
+		return err
+	}
+	// Find any subscription owned by this session for jobID.
+	s.srv.mu.RLock()
+	subs := append([]*subscription(nil), s.srv.subs[req.JobID]...)
+	s.srv.mu.RUnlock()
+	for _, sub := range subs {
+		if sub.session == s {
+			s.srv.removeSubscriber(req.JobID, sub)
+			sub.close()
+			break
+		}
+	}
+	return nil
+}
+
+// unused — silences linter on json import in some builds
+var _ = json.RawMessage(nil)

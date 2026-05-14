@@ -1,0 +1,19 @@
+/*
+ * Copyright (c) 2026 The ARCP Authors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+digraph ResultChunkFlow {
+    graph [rankdir=LR, fontname=Helvetica, bgcolor=transparent];
+    node  [shape=box, style=rounded, fontname=Helvetica];
+
+    A [label="agent", style="rounded,filled", fillcolor="#3B82F6", fontcolor=white];
+    R [label="runtime"];
+    C [label="client", style="rounded,filled", fillcolor="#F59E0B", fontcolor=white];
+
+    A -> R [label="result_chunk[seq=0, more=true]"];
+    R -> C [label="job.event[result_chunk]"];
+    A -> R [label="result_chunk[seq=N, more=false]"];
+    R -> C [label="job.event[result_chunk]"];
+    A -> R [label="(AgentFunc returns)"];
+    R -> C [label="job.result{result_id, result_size}"];
+}

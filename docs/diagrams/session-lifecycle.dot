@@ -1,0 +1,27 @@
+/*
+ * Copyright (c) 2026 The ARCP Authors
+ * Licensed under the Apache License, Version 2.0.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+digraph SessionLifecycle {
+    graph [rankdir=TB, fontname=Helvetica, bgcolor=transparent];
+    node  [shape=box, style=rounded, fontname=Helvetica];
+    edge  [fontname=Helvetica];
+
+    init     [label="init", style="rounded,filled", fillcolor="#3B82F6", fontcolor=white];
+    hello    [label="hello-sent"];
+    welcome  [label="welcomed", style="rounded,filled", fillcolor="#F59E0B", fontcolor=white];
+    active   [label="active"];
+    closedBy [label="closed (bye)"];
+    closedEr [label="closed (error)"];
+    dropped  [label="dropped"];
+
+    init     -> hello   [label="session.hello (§6.2)"];
+    hello    -> welcome [label="session.welcome (§6.2)"];
+    hello    -> closedEr [label="session.error (§6.2)"];
+    welcome  -> active;
+    active   -> closedBy  [label="session.bye (§6.7)"];
+    active   -> closedEr  [label="session.error (§12)"];
+    active   -> dropped   [label="transport drop"];
+    dropped  -> active    [label="resume (§6.3)\nrotates resume_token", style=dashed];
+}
