@@ -18,7 +18,7 @@ and controlling long-running AI agent jobs. The Go SDK ships:
 - an `arcp` CLI.
 
 The full wire surface is documented in
-[../spec/docs/draft-arcp-02.1.md](../../spec/docs/draft-arcp-02.1.md).
+[../spec/docs/draft-arcp-1.1.md](../../spec/docs/draft-arcp-1.1.md).
 
 ## Package map
 
