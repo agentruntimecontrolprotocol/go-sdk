@@ -2,7 +2,7 @@ package arcp
 
 // ProtocolVersion is the literal value carried in every envelope's
 // "arcp" field.
-const ProtocolVersion = "1"
+const ProtocolVersion = "1.1"
 
 // SDKVersion is the version of this Go SDK.
 const SDKVersion = "1.0.0"

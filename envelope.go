@@ -11,7 +11,7 @@ import (
 // Envelope is the wire-level frame for every ARCP message. Field
 // names map exactly onto the JSON object documented in the spec.
 type Envelope struct {
-	// ARCP is the protocol version literal. Always "1" on the wire.
+	// ARCP is the protocol version literal. Always "1.1" on the wire.
 	ARCP string `json:"arcp"`
 	// ID is a unique message identifier (UUIDv7 recommended).
 	ID string `json:"id"`

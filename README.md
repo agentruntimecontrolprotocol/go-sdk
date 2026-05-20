@@ -31,7 +31,7 @@ go get github.com/agentruntimecontrolprotocol/go-sdk@v1.0.0
 
 ## Core concepts
 
-- **Envelope (§5).** Every wire message is `arcp:"1"` + `id` + `type`
+- **Envelope (§5).** Every wire message is `arcp: "1.1"` + `id` + `type`
   + `payload`, with optional session/job/event/trace ids. Unknown
   fields round-trip; v1.0 clients see future fields as opaque.
 - **Session (§6).** `session.hello` → `session.welcome` (or

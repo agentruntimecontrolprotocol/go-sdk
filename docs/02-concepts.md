@@ -8,7 +8,7 @@ kind: concept
 
 # Concepts
 
-- **Envelope (§5)** — every message is `{arcp:"1", id, type, session_id?, job_id?, trace_id?, event_seq?, payload}`. Unknown top-level fields round-trip.
+- **Envelope (§5)** — every message is `{arcp: "1.1", id, type, session_id?, job_id?, trace_id?, event_seq?, payload}`. Unknown top-level fields round-trip.
 - **Session (§6)** — `session.hello` → `session.welcome` (or `session.error`). Either peer ends the session with `session.bye` or transport close.
 - **Job (§7)** — `job.submit` → `job.accepted` → `job.event*` → terminal `job.result` ∣ `job.error`. The submitting session is the only session permitted to cancel.
 - **Lease (§9)** — capability namespace → glob patterns; immutable for the job's lifetime. Optional `expires_at` and `cost.budget` bound time and cost.

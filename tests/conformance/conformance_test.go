@@ -48,7 +48,7 @@ func TestConformance(t *testing.T) {
 	}
 
 	record("§5.1", "envelope arcp constant", func(t *testing.T) {
-		if arcp.ProtocolVersion != "1" {
+		if arcp.ProtocolVersion != "1.1" {
 			t.Fail()
 		}
 	})
