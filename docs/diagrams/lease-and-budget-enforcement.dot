@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 digraph LeaseBudget {
-    graph [rankdir=LR, fontname=Helvetica, bgcolor=transparent];
-    node  [shape=box, style=rounded, fontname=Helvetica];
+    graph [rankdir=LR, fontname="TT Commons Pro Trial", bgcolor=transparent];
+    node  [shape=box, style=rounded, fontname="TT Commons Pro Trial"];
 
     op       [label="validateLeaseOp(now, cap, target)", style="rounded,filled", fillcolor="#3B82F6", fontcolor=white];
     glob     [label="capability glob match?", shape=diamond];

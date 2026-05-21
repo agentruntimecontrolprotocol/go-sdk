@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 digraph JobLifecycle {
-    graph [rankdir=TB, fontname=Helvetica, bgcolor=transparent];
-    node  [shape=box, style=rounded, fontname=Helvetica];
+    graph [rankdir=TB, fontname="TT Commons Pro Trial", bgcolor=transparent];
+    node  [shape=box, style=rounded, fontname="TT Commons Pro Trial"];
 
     pending   [label="pending", style="rounded,filled", fillcolor="#3B82F6", fontcolor=white];
     running   [label="running", style="rounded,filled", fillcolor="#F59E0B", fontcolor=white];

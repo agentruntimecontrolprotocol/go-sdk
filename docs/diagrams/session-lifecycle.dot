@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 digraph SessionLifecycle {
-    graph [rankdir=TB, fontname=Helvetica, bgcolor=transparent];
-    node  [shape=box, style=rounded, fontname=Helvetica];
-    edge  [fontname=Helvetica];
+    graph [rankdir=TB, fontname="TT Commons Pro Trial", bgcolor=transparent];
+    node  [shape=box, style=rounded, fontname="TT Commons Pro Trial"];
+    edge  [fontname="TT Commons Pro Trial"];
 
     init     [label="init", style="rounded,filled", fillcolor="#3B82F6", fontcolor=white];
     hello    [label="hello-sent"];

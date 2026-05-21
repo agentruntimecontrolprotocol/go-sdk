@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 digraph HeartbeatFlow {
-    graph [rankdir=LR, fontname=Helvetica, bgcolor=transparent];
-    node  [shape=box, style=rounded, fontname=Helvetica];
+    graph [rankdir=LR, fontname="TT Commons Pro Trial", bgcolor=transparent];
+    node  [shape=box, style=rounded, fontname="TT Commons Pro Trial"];
 
     C [label="client", style="rounded,filled", fillcolor="#3B82F6", fontcolor=white];
     R [label="runtime", style="rounded,filled", fillcolor="#F59E0B", fontcolor=white];
