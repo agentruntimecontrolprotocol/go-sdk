@@ -3,7 +3,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](./LICENSE)
 [![Go version](https://img.shields.io/badge/go-%E2%89%A5%201.23-blue)](./go.mod)
 
-Go SDK for [ARCP](../spec/docs/draft-arcp-1.1.md), the wire protocol
+Go SDK for [ARCP](https://github.com/agentruntimecontrolprotocol/spec/blob/main/docs/draft-arcp-1.1.md), the wire protocol
 an agent uses to talk to the runtime that hosts it. Ships a client, a
 server, transports for WebSocket / stdio / in-memory, OTel middleware,
 and the `arcp` CLI.
