@@ -5,7 +5,7 @@ package arcp
 const ProtocolVersion = "1.1"
 
 // SDKVersion is the version of this Go SDK.
-const SDKVersion = "1.0.0"
+const SDKVersion = "1.1.0"
 
 // Features is the canonical list of negotiable feature flags advertised
 // in session.hello and session.welcome capabilities.
