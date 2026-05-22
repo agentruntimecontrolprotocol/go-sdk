@@ -23,6 +23,24 @@ func TestValidateOpPermission(t *testing.T) {
 	}
 }
 
+func TestValidateOpModelUse(t *testing.T) {
+	st := lease.NewState(arcp.Lease{
+		arcp.CapModelUse: {"tier-fast/*"},
+	}, nil)
+	if err := st.ValidateOp(time.Now(), arcp.CapModelUse, "tier-fast/gpt-4o-mini"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateOpModelUseDenied(t *testing.T) {
+	st := lease.NewState(arcp.Lease{
+		arcp.CapModelUse: {"tier-fast/*"},
+	}, nil)
+	if err := st.ValidateOp(time.Now(), arcp.CapModelUse, "tier-deep/gpt-4o"); !errors.Is(err, arcp.ErrPermissionDenied) {
+		t.Fatalf("want PERMISSION_DENIED, got %v", err)
+	}
+}
+
 func TestExpiresAt(t *testing.T) {
 	exp := time.Now().Add(50 * time.Millisecond)
 	st := lease.NewState(arcp.Lease{

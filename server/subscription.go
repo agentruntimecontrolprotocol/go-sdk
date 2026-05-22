@@ -8,8 +8,8 @@ import (
 )
 
 type subscription struct {
-	session  *session
-	jobID    string
+	session   *session
+	jobID     string
 	closeOnce sync.Once
 	closed    chan struct{}
 }

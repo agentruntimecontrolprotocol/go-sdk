@@ -62,9 +62,9 @@ func (*SessionHello) ARCPType() string { return TypeSessionHello }
 
 // ResumeRequest is the optional resume block inside SessionHello.
 type ResumeRequest struct {
-	SessionID     string `json:"session_id"`
-	ResumeToken   string `json:"resume_token"`
-	LastEventSeq  uint64 `json:"last_event_seq"`
+	SessionID    string `json:"session_id"`
+	ResumeToken  string `json:"resume_token"`
+	LastEventSeq uint64 `json:"last_event_seq"`
 }
 
 // SessionWelcome is the runtime's response to session.hello.

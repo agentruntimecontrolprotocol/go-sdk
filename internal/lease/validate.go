@@ -155,6 +155,8 @@ func canonicalizeTarget(cap arcp.Capability, target string) string {
 		if u, err := CanonicalizeURL(target); err == nil {
 			return u
 		}
+	case arcp.CapModelUse:
+		return target
 	}
 	return target
 }

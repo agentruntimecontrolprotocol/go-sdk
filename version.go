@@ -17,6 +17,8 @@ var Features = []string{
 	"agent_versions",
 	"lease_expires_at",
 	"cost.budget",
+	"model.use",
+	"provisioned_credentials",
 	"progress",
 	"result_chunk",
 }

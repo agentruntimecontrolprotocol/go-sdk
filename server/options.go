@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/agentruntimecontrolprotocol/go-sdk/auth"
+	"github.com/agentruntimecontrolprotocol/go-sdk/credentials"
 	"github.com/agentruntimecontrolprotocol/go-sdk/internal/clock"
 )
 
@@ -37,6 +38,9 @@ type Options struct {
 	// Features overrides the advertised feature list. Empty uses the
 	// SDK default.
 	Features []string
+	// Provisioner mints lease-bound credentials for accepted jobs. When
+	// nil, provisioned_credentials is not advertised.
+	Provisioner credentials.Provisioner
 	// MaxResultBytes caps a single streamed result. Zero uses 32MiB.
 	MaxResultBytes int64
 	// ChunkSize caps an individual result_chunk body. Zero uses 1MiB.

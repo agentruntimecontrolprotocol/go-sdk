@@ -173,12 +173,19 @@ func (s *Server) Close() error {
 // features returns the advertised feature list.
 func (s *Server) features() []string {
 	if len(s.opts.Features) > 0 {
-		out := make([]string, len(s.opts.Features))
-		copy(out, s.opts.Features)
-		return out
+		return s.filterFeatures(s.opts.Features)
 	}
-	out := make([]string, len(arcp.Features))
-	copy(out, arcp.Features)
+	return s.filterFeatures(arcp.Features)
+}
+
+func (s *Server) filterFeatures(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, f := range in {
+		if (f == "provisioned_credentials" || f == "model.use") && s.opts.Provisioner == nil {
+			continue
+		}
+		out = append(out, f)
+	}
 	return out
 }
 

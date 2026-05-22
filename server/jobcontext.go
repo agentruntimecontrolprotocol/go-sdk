@@ -107,6 +107,44 @@ func (jc *JobContext) Status(phase, message string) {
 	jc.emitEvent(messages.KindStatus, messages.StatusBody{Phase: phase, Message: message})
 }
 
+// RotateCredential updates a stored credential value, emits a submitter
+// status event, and revokes the prior upstream credential.
+func (jc *JobContext) RotateCredential(id, newValue string) error {
+	if jc.job.session.srv.opts.Provisioner == nil {
+		return arcp.ErrInvalidRequest.WithMessage("credential provisioner is not configured")
+	}
+	if !jc.job.replaceCredentialValue(id, newValue) {
+		return arcp.ErrInvalidRequest.WithMessage("credential " + id + " is not attached to job")
+	}
+	body := messages.StatusBody{
+		Phase:   messages.PhaseCredentialRotated,
+		Message: id,
+		Details: map[string]any{
+			"id":    id,
+			"value": newValue,
+		},
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	ev := messages.JobEvent{
+		Kind: messages.KindStatus,
+		TS:   jc.job.session.srv.opts.Clock.Now(),
+		Body: raw,
+	}
+	env, err := arcp.NewEnvelope(messages.TypeJobEvent, &ev)
+	if err != nil {
+		return err
+	}
+	env.JobID = jc.job.id
+	env.TraceID = jc.job.traceID
+	env.EventSeq = jc.job.session.nextSeq()
+	jc.job.session.send(env)
+	jc.job.revokeCredential(id)
+	return nil
+}
+
 // Metric emits a "metric" event. If name begins with "cost." and unit
 // matches a budgeted currency, the runtime debits the counter and may
 // emit a follow-up cost.budget.remaining metric.

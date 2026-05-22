@@ -25,8 +25,8 @@ const (
 	TypeJobUnsubscribe = "job.unsubscribe"
 )
 
-// Event kinds carried inside JobEvent.Kind. The eight v1.0 kinds plus
-// progress and result_chunk.
+// Event kinds carried inside JobEvent.Kind. The eight reserved kinds
+// (per spec §8.2) plus the v1.1 additions (progress, result_chunk).
 const (
 	KindLog         = "log"
 	KindThought     = "thought"
@@ -48,4 +48,9 @@ const (
 	StatusError     = "error"
 	StatusCancelled = "cancelled"
 	StatusTimedOut  = "timed_out"
+)
+
+// Reserved status event phases.
+const (
+	PhaseCredentialRotated = "credential_rotated"
 )

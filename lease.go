@@ -19,6 +19,7 @@ const (
 	CapNetFetch      Capability = "net.fetch"
 	CapToolCall      Capability = "tool.call"
 	CapAgentDelegate Capability = "agent.delegate"
+	CapModelUse      Capability = "model.use"
 	CapCostBudget    Capability = "cost.budget"
 )
 

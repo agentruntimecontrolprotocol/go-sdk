@@ -44,6 +44,8 @@ machine-readable summary.
 | §9.4    | Lease subsetting (budget + expires_at)               | ✅     |
 | §9.5    | lease_constraints.expires_at + LEASE_EXPIRED         | ✅     |
 | §9.6    | cost.budget counters + BUDGET_EXHAUSTED              | ✅     |
+| §9.7    | model.use lease capability                           | ✅     |
+| §9.8    | Provisioned credentials                              | ✅     |
 | §10     | Delegation                                           | ✅     |
 | §11     | Trace context propagation                            | ✅     |
 | §12     | Fifteen canonical error codes                        | ✅     |

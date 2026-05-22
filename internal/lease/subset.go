@@ -19,6 +19,8 @@ func IsSubset(parent, child arcp.Lease, parentRemaining map[arcp.Currency]float6
 			}
 			continue
 		}
+		// Non-budget capabilities, including model.use, flow through
+		// the generic glob subset check unchanged.
 		parentPatterns, ok := parent[cap]
 		if !ok {
 			return arcp.ErrLeaseSubsetViolation.WithMessage("child lease has capability " + string(cap) + " missing from parent")

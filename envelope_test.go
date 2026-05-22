@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	arcp "github.com/agentruntimecontrolprotocol/go-sdk"
-	_ "github.com/agentruntimecontrolprotocol/go-sdk/messages"
 	"github.com/agentruntimecontrolprotocol/go-sdk/messages"
+	_ "github.com/agentruntimecontrolprotocol/go-sdk/messages"
 	"github.com/stretchr/testify/require"
 )
 
@@ -64,10 +64,10 @@ func TestCodeAndIsRetryable(t *testing.T) {
 
 func TestParseBudgetAmount(t *testing.T) {
 	for _, tc := range []struct {
-		in   string
-		ok   bool
-		cur  arcp.Currency
-		val  float64
+		in  string
+		ok  bool
+		cur arcp.Currency
+		val float64
 	}{
 		{"USD:5.00", true, "USD", 5.00},
 		{"credits:1000", true, "credits", 1000},

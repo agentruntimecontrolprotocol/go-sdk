@@ -54,8 +54,9 @@ type ToolError struct {
 
 // StatusBody is the body of a "status" event.
 type StatusBody struct {
-	Phase   string `json:"phase"`
-	Message string `json:"message,omitempty"`
+	Phase   string         `json:"phase"`
+	Message string         `json:"message,omitempty"`
+	Details map[string]any `json:"details,omitempty"`
 }
 
 // MetricBody is the body of a "metric" event.

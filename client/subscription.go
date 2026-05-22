@@ -19,12 +19,12 @@ type Subscription struct {
 	client *Client
 	jobID  string
 
-	mu       sync.Mutex
-	events   chan messages.JobEvent
-	doneCh   chan struct{}
-	err      error
-	ack      *messages.JobSubscribed
-	ackCh    chan messages.JobSubscribed
+	mu     sync.Mutex
+	events chan messages.JobEvent
+	doneCh chan struct{}
+	err    error
+	ack    *messages.JobSubscribed
+	ackCh  chan messages.JobSubscribed
 }
 
 // Subscribe attaches the current session to jobID. The runtime

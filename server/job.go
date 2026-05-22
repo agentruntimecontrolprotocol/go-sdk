@@ -29,14 +29,17 @@ type Job struct {
 	parent *Job
 
 	lease *lease.State
+	creds []messages.Credential
 
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu       sync.Mutex
-	statusV  string
-	terminal bool
-	cancelRe string
+	mu         sync.Mutex
+	credsMu    sync.Mutex
+	revokeOnce sync.Once
+	statusV    string
+	terminal   bool
+	cancelRe   string
 
 	expiryTimer clock.Timer
 
@@ -137,6 +140,30 @@ func (j *Job) snapshot() messages.JobInfo {
 	}
 }
 
+func (j *Job) attachCredentials(creds []messages.Credential) {
+	j.credsMu.Lock()
+	defer j.credsMu.Unlock()
+	j.creds = append(j.creds, creds...)
+}
+
+func (j *Job) outstandingCredentials() []messages.Credential {
+	j.credsMu.Lock()
+	defer j.credsMu.Unlock()
+	return append([]messages.Credential(nil), j.creds...)
+}
+
+func (j *Job) replaceCredentialValue(id, newValue string) bool {
+	j.credsMu.Lock()
+	defer j.credsMu.Unlock()
+	for i := range j.creds {
+		if j.creds[i].ID == id {
+			j.creds[i].Value = newValue
+			return true
+		}
+	}
+	return false
+}
+
 func (j *Job) cancelWithReason(reason string) {
 	j.mu.Lock()
 	j.cancelRe = reason
@@ -149,6 +176,7 @@ func (j *Job) expireLease() {
 		return
 	}
 	j.emitTerminalError(arcp.CodeLeaseExpired, "lease expired during execution")
+	j.revokeAll()
 	j.cancel()
 }
 
@@ -157,6 +185,7 @@ func (j *Job) timeout() {
 		return
 	}
 	j.emitTerminalError(arcp.CodeTimeout, "job exceeded max_runtime_sec")
+	j.revokeAll()
 	j.cancel()
 }
 
@@ -220,6 +249,7 @@ func (j *Job) run() {
 				Retryable:   false,
 			}
 			j.emitTerminal(messages.TypeJobError, &body)
+			j.revokeAll()
 		}
 		return
 	}
@@ -233,6 +263,7 @@ func (j *Job) run() {
 				Retryable:   arcp.IsRetryable(err),
 			}
 			j.emitTerminal(messages.TypeJobError, &body)
+			j.revokeAll()
 		}
 		return
 	}
@@ -248,6 +279,7 @@ func (j *Job) run() {
 			ResultSize:  jc.streamed.size,
 		}
 		j.emitTerminal(messages.TypeJobResult, &final)
+		j.revokeAll()
 		return
 	}
 	if !j.markTerminal(messages.StatusSuccess) {
@@ -267,9 +299,47 @@ func (j *Job) run() {
 				Retryable:   true,
 			}
 			j.emitTerminal(messages.TypeJobError, &ebody)
+			j.revokeAll()
 			return
 		}
 		body.Output = raw
 	}
 	j.emitTerminal(messages.TypeJobResult, &body)
+	j.revokeAll()
+}
+
+func (j *Job) revokeAll() {
+	if j.session.srv.opts.Provisioner == nil {
+		return
+	}
+	j.revokeOnce.Do(func() {
+		creds := j.outstandingCredentials()
+		for _, cred := range creds {
+			j.revokeCredential(cred.ID)
+		}
+	})
+}
+
+func (j *Job) revokeCredential(id string) {
+	backoff := []time.Duration{50 * time.Millisecond, 250 * time.Millisecond, time.Second}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var err error
+	for attempt := 0; attempt < len(backoff)+1; attempt++ {
+		err = j.session.srv.opts.Provisioner.Revoke(ctx, id)
+		if err == nil {
+			return
+		}
+		if attempt == len(backoff) {
+			break
+		}
+		timer := time.NewTimer(backoff[attempt])
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			break
+		}
+	}
+	j.session.srv.opts.Logger.Error("credential revocation failed", "job_id", j.id, "credential_id", id, "err", err)
 }

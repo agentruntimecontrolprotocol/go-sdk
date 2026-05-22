@@ -10,6 +10,7 @@ import (
 	"time"
 
 	arcp "github.com/agentruntimecontrolprotocol/go-sdk"
+	"github.com/agentruntimecontrolprotocol/go-sdk/credentials"
 	"github.com/agentruntimecontrolprotocol/go-sdk/internal/clock"
 	"github.com/agentruntimecontrolprotocol/go-sdk/internal/eventlog"
 	"github.com/agentruntimecontrolprotocol/go-sdk/internal/idstore"
@@ -31,6 +32,9 @@ type session struct {
 
 	outbox chan arcp.Envelope
 	wg     sync.WaitGroup
+
+	sendMu       sync.Mutex
+	outboxClosed bool
 
 	seqMu sync.Mutex
 	seq   uint64
@@ -133,10 +137,25 @@ func (s *session) currentSeq() uint64 {
 // send enqueues env on the outbox.
 func (s *session) send(env arcp.Envelope) {
 	env.SessionID = s.id
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	if s.outboxClosed {
+		return
+	}
 	select {
 	case s.outbox <- env:
 	case <-s.ctx.Done():
 	}
+}
+
+func (s *session) closeOutbox() {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	if s.outboxClosed {
+		return
+	}
+	s.outboxClosed = true
+	close(s.outbox)
 }
 
 // writeLoop drains outbox; one writer per session.
@@ -165,6 +184,9 @@ func (s *session) recordOutbound(env arcp.Envelope) {
 	if env.EventSeq == 0 {
 		return
 	}
+	if isCredentialRotation(env) {
+		return
+	}
 	_ = s.srv.log.Append(eventlog.Entry{
 		SessionID: s.id,
 		EventSeq:  env.EventSeq,
@@ -174,6 +196,21 @@ func (s *session) recordOutbound(env arcp.Envelope) {
 	})
 }
 
+func isCredentialRotation(env arcp.Envelope) bool {
+	if env.Type != messages.TypeJobEvent {
+		return false
+	}
+	var ev messages.JobEvent
+	if err := env.DecodePayload(&ev); err != nil || ev.Kind != messages.KindStatus {
+		return false
+	}
+	var body messages.StatusBody
+	if err := json.Unmarshal(ev.Body, &body); err != nil {
+		return false
+	}
+	return body.Phase == messages.PhaseCredentialRotated
+}
+
 // run drives the read loop. Returns when the session ends.
 func (s *session) run(ctx context.Context) error {
 	s.wg.Add(1)
@@ -181,7 +218,7 @@ func (s *session) run(ctx context.Context) error {
 
 	defer func() {
 		s.cancel()
-		close(s.outbox)
+		s.closeOutbox()
 		s.wg.Wait()
 		_ = s.transport.Close()
 	}()
@@ -371,6 +408,22 @@ func (s *session) handleJobSubmit(ctx context.Context, env arcp.Envelope) error 
 		AcceptedAt:       s.srv.opts.Clock.Now(),
 		TraceID:          job.traceID,
 		Agent:            canonical,
+	}
+	if s.hasFeature("provisioned_credentials") && s.srv.opts.Provisioner != nil {
+		creds, err := s.srv.opts.Provisioner.Issue(ctx, credentials.IssueRequest{
+			JobID:     job.id,
+			Principal: s.principal,
+			Agent:     canonical,
+			Lease:     job.lease.Lease(),
+			Budget:    job.lease.Initial(),
+			ExpiresAt: job.lease.ExpiresAt(),
+		})
+		if err != nil {
+			s.srv.unregisterJob(job.id)
+			return s.sendError(arcp.Code(err), "credential issue failed: "+err.Error())
+		}
+		job.attachCredentials(creds)
+		accept.Credentials = creds
 	}
 	aenv, err := arcp.NewEnvelope(messages.TypeJobAccepted, &accept)
 	if err != nil {

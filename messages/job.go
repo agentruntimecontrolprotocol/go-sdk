@@ -15,12 +15,12 @@ type LeaseConstraints struct {
 
 // JobSubmit is the client request to create a new job.
 type JobSubmit struct {
-	Agent            string           `json:"agent"`
-	Input            json.RawMessage  `json:"input,omitempty"`
-	LeaseRequest     arcp.Lease       `json:"lease_request,omitempty"`
+	Agent            string            `json:"agent"`
+	Input            json.RawMessage   `json:"input,omitempty"`
+	LeaseRequest     arcp.Lease        `json:"lease_request,omitempty"`
 	LeaseConstraints *LeaseConstraints `json:"lease_constraints,omitempty"`
-	IdempotencyKey   string           `json:"idempotency_key,omitempty"`
-	MaxRuntimeSec    int              `json:"max_runtime_sec,omitempty"`
+	IdempotencyKey   string            `json:"idempotency_key,omitempty"`
+	MaxRuntimeSec    int               `json:"max_runtime_sec,omitempty"`
 }
 
 // ARCPType returns the wire-type string for JobSubmit.
@@ -29,18 +29,38 @@ func (*JobSubmit) ARCPType() string { return TypeJobSubmit }
 // JobAccepted echoes the effective lease and constraints back to the
 // submitter.
 type JobAccepted struct {
-	JobID            string                  `json:"job_id"`
-	Lease            arcp.Lease              `json:"lease,omitempty"`
-	LeaseConstraints *LeaseConstraints       `json:"lease_constraints,omitempty"`
+	JobID            string                    `json:"job_id"`
+	Lease            arcp.Lease                `json:"lease,omitempty"`
+	LeaseConstraints *LeaseConstraints         `json:"lease_constraints,omitempty"`
 	Budget           map[arcp.Currency]float64 `json:"budget,omitempty"`
-	AcceptedAt       time.Time               `json:"accepted_at"`
-	TraceID          string                  `json:"trace_id,omitempty"`
-	ParentJobID      string                  `json:"parent_job_id,omitempty"`
-	Agent            string                  `json:"agent,omitempty"`
+	Credentials      []Credential              `json:"credentials,omitempty"`
+	AcceptedAt       time.Time                 `json:"accepted_at"`
+	TraceID          string                    `json:"trace_id,omitempty"`
+	ParentJobID      string                    `json:"parent_job_id,omitempty"`
+	Agent            string                    `json:"agent,omitempty"`
 }
 
 // ARCPType returns the wire-type string for JobAccepted.
 func (*JobAccepted) ARCPType() string { return TypeJobAccepted }
+
+// CredentialConstraints describes the lease-derived limits baked into
+// a provisioned credential.
+type CredentialConstraints struct {
+	CostBudget []string   `json:"cost.budget,omitempty"`
+	ModelUse   []string   `json:"model.use,omitempty"`
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+}
+
+// Credential is the vendor-neutral credential shape carried in
+// job.accepted for provisioned_credentials sessions.
+type Credential struct {
+	ID          string                 `json:"id"`
+	Scheme      string                 `json:"scheme"`
+	Value       string                 `json:"value"`
+	Endpoint    string                 `json:"endpoint"`
+	Profile     string                 `json:"profile,omitempty"`
+	Constraints *CredentialConstraints `json:"constraints,omitempty"`
+}
 
 // JobEvent is one event in the job's event stream. Body is the
 // kind-specific shape; decode it with EventBodyFor(kind).

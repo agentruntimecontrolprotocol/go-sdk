@@ -11,7 +11,7 @@ and the `arcp` CLI.
 ## Install
 
 ```sh
-go get github.com/agentruntimecontrolprotocol/go-sdk@v1.0.0
+go get github.com/agentruntimecontrolprotocol/go-sdk@latest
 ```
 
 ## Packages
@@ -24,6 +24,7 @@ go get github.com/agentruntimecontrolprotocol/go-sdk@v1.0.0
 | `.../go-sdk/transport`                                     | Custom transports, or pairing `MemoryTransport` in tests.                |
 | `.../go-sdk/messages`                                      | Direct envelope construction (rare; clients and servers do it for you).  |
 | `.../go-sdk/auth`                                          | The `Verifier` interface for bearer-token authentication.                |
+| `.../go-sdk/credentials`                                   | Provisioner interface and in-memory lease-bound credential provider.     |
 | `.../go-sdk/middleware/nethttp`                            | Attaching the WS upgrade to an existing `*http.Server`.                  |
 | `.../go-sdk/middleware/chi`                                | Mounting on a `chi.Router`.                                              |
 | `.../go-sdk/middleware/otel`                               | W3C trace-context propagation per spec §11.                              |
@@ -40,7 +41,10 @@ go get github.com/agentruntimecontrolprotocol/go-sdk@v1.0.0
   terminal `job.result` ∣ `job.error`.
 - **Lease (§9).** Capability namespace → glob patterns, immutable at
   submit. Optional `expires_at` and `cost.budget` add time and budget
-  bounds.
+  bounds; `model.use` gates runtime-mediated model calls.
+- **Provisioned credentials (§9.8).** Runtimes can issue short-lived,
+  lease-bound credentials in `job.accepted` and revoke them on terminal
+  job states.
 - **Event (§8).** One `job.event` envelope, `payload.kind` ∈ the ten
   reserved values plus `x-vendor.*`.
 - **Subscribe (§7.6).** Re-attach to a job from a different session.
@@ -96,6 +100,8 @@ func main() {
 | `agent_versions`    | §7.5    | `name@version` grammar; rich `agents` inventory            |
 | `lease_expires_at`  | §9.5    | `lease_constraints.expires_at`                             |
 | `cost.budget`       | §9.6    | `cost.budget` lease capability and runtime counters        |
+| `model.use`         | §9.7    | Model/profile lease capability                             |
+| `provisioned_credentials` | §9.8 | Lease-bound credentials in `job.accepted`               |
 | `progress`          | §8.2.1  | `progress` event kind                                      |
 | `result_chunk`      | §8.4    | `result_chunk` event kind and streamed `job.result`        |
 

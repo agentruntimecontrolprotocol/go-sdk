@@ -131,6 +131,16 @@ func TestConformance(t *testing.T) {
 			t.Fail()
 		}
 	})
+	record("§9.7", "model.use feature and lease constant", func(t *testing.T) {
+		if arcp.CapModelUse != "model.use" || !arcp.HasFeature(arcp.Features, "model.use") {
+			t.Fail()
+		}
+	})
+	record("§9.8", "provisioned credentials feature", func(t *testing.T) {
+		if !arcp.HasFeature(arcp.Features, "provisioned_credentials") {
+			t.Fail()
+		}
+	})
 
 	// Write conformance.json summary.
 	body, _ := json.MarshalIndent(rows, "", "  ")
