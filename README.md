@@ -8,6 +8,7 @@
   <a href="https://goreportcard.com/report/github.com/agentruntimecontrolprotocol/go-sdk"><img alt="Go report card" src="https://goreportcard.com/badge/github.com/agentruntimecontrolprotocol/go-sdk"></a>
   <a href="https://github.com/agentruntimecontrolprotocol/spec/blob/main/docs/draft-arcp-1.1.md"><img alt="ARCP" src="https://img.shields.io/badge/ARCP-v1.1%20draft-blue"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-lightgrey"></a>
+  <a href="https://coderabbit.ai"><img alt="CodeRabbit" src="https://img.shields.io/coderabbit/prs/github/agentruntimecontrolprotocol/go-sdk?utm_source=oss&utm_medium=github&utm_campaign=agentruntimecontrolprotocol/go-sdk&labelColor=171717&color=FF570A&label=CodeRabbit+Reviews"></a>
 </p>
 
 <p align="center">
