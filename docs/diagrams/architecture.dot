@@ -1,0 +1,80 @@
+/*
+ * Copyright (c) 2026 The ARCP Authors
+ * Licensed under the Apache License, Version 2.0.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+digraph ARCPGoSDK {
+    graph [rankdir=LR, fontname="TT Commons Pro Trial", bgcolor=transparent, compound=true];
+    node  [shape=box, style=rounded, fontname="TT Commons Pro Trial"];
+    edge  [fontname="TT Commons Pro Trial", color="#94A3B8", fontcolor="#475569"];
+
+    /* Client side */
+    subgraph cluster_client {
+        label="client (caller process)";
+        style="rounded,dashed";
+        color="#94A3B8";
+        fontcolor="#475569";
+        Client [label="client.Client", style="rounded,filled", fillcolor="#3B82F6", fontcolor=white];
+        JobHandle [label="JobHandle"];
+        Subscription [label="Subscription"];
+        Client -> JobHandle [style=dashed, label="Submit"];
+        Client -> Subscription [style=dashed, label="Subscribe"];
+    }
+
+    /* Transport layer */
+    subgraph cluster_transport {
+        label="transport";
+        style="rounded,dashed";
+        color="#94A3B8";
+        fontcolor="#475569";
+        WS [label="transport.NewWebSocket\nDialWebSocket"];
+        STDIO [label="transport.NewStdioTransport"];
+        MEM [label="transport.NewMemoryPair"];
+    }
+
+    /* Middleware */
+    subgraph cluster_middleware {
+        label="middleware (optional)";
+        style="rounded,dashed";
+        color="#94A3B8";
+        fontcolor="#475569";
+        NHTTP [label="middleware/nethttp\n(NewHandler)"];
+        CHI [label="middleware/chi\n(Mount)"];
+        OTEL [label="middleware/otel\n(WrapTransport)"];
+    }
+
+    /* Server side */
+    subgraph cluster_server {
+        label="server (runtime process)";
+        style="rounded,dashed";
+        color="#94A3B8";
+        fontcolor="#475569";
+        Server [label="server.Server", style="rounded,filled", fillcolor="#F59E0B", fontcolor=white];
+        Agents [label="AgentFunc table\n(RegisterAgent / RegisterAgentVersion)"];
+        JobCtx [label="server.JobContext"];
+        Verifier [label="auth.Verifier"];
+        Provisioner [label="credentials.Provisioner\n(optional)"];
+        EventLog [label="internal/eventlog (in-memory ring,\nfeeds resume + subscribe replay)"];
+        IDStore [label="internal/idstore\n(idempotency keys, 24h)"];
+
+        Server -> Agents [style=dashed];
+        Server -> Verifier [style=dashed, label="hello.auth.token"];
+        Server -> Provisioner [style=dashed, label="if model.use /\nprovisioned_credentials"];
+        Server -> EventLog [style=dashed];
+        Server -> IDStore [style=dashed];
+        Server -> JobCtx [style=dashed, label="per job"];
+    }
+
+    /* Wire */
+    Client -> WS  [label="envelopes"];
+    Client -> STDIO;
+    Client -> MEM;
+    WS  -> Server [label="envelopes"];
+    STDIO -> Server;
+    MEM -> Server;
+
+    /* Optional wrappers */
+    NHTTP -> Server [style=dotted, label="ServeHTTP\n→ Accept"];
+    CHI -> NHTTP  [style=dotted];
+    OTEL -> WS    [style=dotted, label="wraps either end"];
+}

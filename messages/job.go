@@ -63,7 +63,7 @@ type Credential struct {
 }
 
 // JobEvent is one event in the job's event stream. Body is the
-// kind-specific shape; decode it with EventBodyFor(kind).
+// kind-specific shape; decode it with DecodeEventBody.
 type JobEvent struct {
 	Kind string          `json:"kind"`
 	TS   time.Time       `json:"ts"`

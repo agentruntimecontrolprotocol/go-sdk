@@ -1,19 +1,15 @@
 # Diagrams
 
-Source `.dot` files for the spec diagrams. Run `./render.sh` to
-produce paired `*-light.svg` and `*-dark.svg` next to each source.
-`make diagrams` from the repo root invokes this.
+Source `.dot` files for the diagrams that ship with the Go SDK docs.
+Run `./render.sh` to produce paired `*-light.svg` and `*-dark.svg`
+next to each source. `make diagrams` from the repo root invokes this.
 
 ## Set
 
-1. `package-graph.dot` — module dependency graph.
-2. `session-lifecycle.dot` — session FSM with resume edge.
-3. `job-lifecycle.dot` — pending → running → terminal with lease/budget edges.
-4. `capability-negotiation.dot` — hello/welcome intersection.
-5. `subscribe-attach-flow.dot` — cross-session attach + permission boundary.
-6. `heartbeat-flow.dot` — ping/pong + watchdog HEARTBEAT_LOST.
-7. `result-chunk-flow.dot` — agent → runtime → client streamed result.
-8. `lease-and-budget-enforcement.dot` — validateLeaseOp decision tree.
+1. `architecture.dot` — top-level component layout: client, transports, middleware, server, and the runtime's auth/credentials/eventlog/idstore dependencies. Embedded on the front page and in [architecture.md](../architecture.md).
+2. `session-lifecycle.dot` — session FSM, including the resume edge that reuses the prior `session_id` and rotates the `resume_token`. Embedded in [guides/sessions.md](../guides/sessions.md) and [guides/resume.md](../guides/resume.md).
+3. `job-lifecycle.dot` — `pending → running → terminal` with the lease, budget, and timeout edges that drive each terminal status. Embedded in [guides/jobs.md](../guides/jobs.md).
+4. `lease-and-budget-enforcement.dot` — `ValidateOp` decision tree (expiry → glob → budget → proceed; `cost.*` metrics debit on the proceed path). Embedded in [guides/leases.md](../guides/leases.md).
 
 ## Conventions
 

@@ -16,11 +16,11 @@ digraph LeaseBudget {
     expired  [label="LEASE_EXPIRED (§9.5)"];
     broke    [label="BUDGET_EXHAUSTED (§9.6)"];
 
-    op       -> glob;
-    glob     -> expiry  [label="yes"];
-    glob     -> deny    [label="no"];
-    expiry   -> budget  [label="yes"];
+    op       -> expiry;
+    expiry   -> glob    [label="yes"];
     expiry   -> expired [label="no"];
+    glob     -> budget  [label="yes"];
+    glob     -> deny    [label="no"];
     budget   -> proceed [label="yes"];
     budget   -> broke   [label="no"];
 }

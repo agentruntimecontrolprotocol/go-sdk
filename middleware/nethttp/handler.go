@@ -103,7 +103,34 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		delete(h.active, id)
 		h.mu.Unlock()
 	}()
+	if h.opts.PingInterval > 0 {
+		pingCtx, cancelPing := context.WithCancel(r.Context())
+		defer cancelPing()
+		go pingLoop(pingCtx, conn, h.opts.PingInterval)
+	}
 	_ = h.srv.Accept(r.Context(), t)
+}
+
+// pingLoop sends a WebSocket-layer Ping at the configured interval
+// until ctx is cancelled or the conn fails. WS pings are independent
+// of the ARCP-level session.ping heartbeat — they keep idle TCP
+// connections alive through NAT timeouts and load balancers.
+func pingLoop(ctx context.Context, conn *websocket.Conn, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pingCtx, cancel := context.WithTimeout(ctx, interval)
+			err := conn.Ping(pingCtx)
+			cancel()
+			if err != nil {
+				return
+			}
+		}
+	}
 }
 
 // Shutdown closes every active WebSocket with status 1001 (Going

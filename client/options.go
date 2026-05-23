@@ -7,6 +7,7 @@ import (
 	"time"
 
 	arcp "github.com/agentruntimecontrolprotocol/go-sdk"
+	"github.com/agentruntimecontrolprotocol/go-sdk/messages"
 )
 
 // Options configures a Client.
@@ -27,6 +28,13 @@ type Options struct {
 	AutoAckWindow uint64
 	// AutoAckInterval bounds how long auto-ack waits between sends.
 	AutoAckInterval time.Duration
+	// Resume, if non-nil, asks the runtime to continue a previously
+	// dropped session: the SessionID and ResumeToken come from the
+	// prior welcome, and LastEventSeq is the highest event_seq the
+	// caller has already processed. The runtime replays every event
+	// with seq greater than LastEventSeq before live traffic resumes.
+	// The token is single-use; the next welcome carries a fresh one.
+	Resume *messages.ResumeRequest
 }
 
 func (o Options) withDefaults() Options {

@@ -28,9 +28,9 @@ surface.
 | [Job events](./guides/job-events.md) | §8 |
 | [Leases](./guides/leases.md) | §9 |
 | [Delegation](./guides/delegation.md) | §10 |
-| [Observability](./guides/observability.md) | §11 |
+| [Observability](./guides/observability.md) | §8.2, §11 |
 | [Errors](./guides/errors.md) | §12 |
-| [Vendor extensions](./guides/vendor-extensions.md) | §15 |
+| [Vendor extensions](./guides/vendor-extensions.md) | §5, §15 |
 
 ## Packages
 

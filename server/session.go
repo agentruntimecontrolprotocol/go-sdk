@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -43,6 +44,13 @@ type session struct {
 	high   uint64 // last_processed_seq from session.ack
 
 	heartbeatLost atomic.Bool
+	// gracefulBye is set when the client (or server) sends session.bye.
+	// It suppresses resume-state stashing on session exit.
+	gracefulBye atomic.Bool
+	// resumeToken is the resume_token sent in this session's welcome.
+	// Used to seed the resumeEntry on non-graceful exit so the client
+	// can present it back on a subsequent hello.Resume.
+	resumeToken string
 }
 
 func (srv *Server) handshake(ctx context.Context, t transport.Transport) (*session, error) {
@@ -68,11 +76,75 @@ func (srv *Server) handshake(ctx context.Context, t transport.Transport) (*sessi
 	} else {
 		principal = hello.Client.Name
 	}
+	// Resume path: validate the resume block, reuse the prior
+	// session_id and seq counter, rotate the resume_token, and replay
+	// every event with seq > hello.Resume.LastEventSeq.
+	if hello.Resume != nil {
+		entry, rerr := srv.claimResume(*hello.Resume)
+		if rerr != nil {
+			_ = sendSessionError(ctx, t, hello.Resume.SessionID, arcp.Code(rerr), rerr.Error())
+			return nil, rerr
+		}
+		if entry.principal != principal {
+			_ = sendSessionError(ctx, t, hello.Resume.SessionID, arcp.CodeUnauthenticated, "resume principal mismatch")
+			return nil, arcp.ErrUnauthenticated.WithMessage("resume principal mismatch")
+		}
+		feats := arcp.IntersectFeatures(srv.features(), hello.Capabilities.Features)
+		newToken := arcp.NewULID()
+		welcome := messages.SessionWelcome{
+			Runtime:              messages.RuntimeInfo{Name: srv.opts.Name, Version: srv.opts.Version},
+			ResumeToken:          newToken,
+			ResumeWindowSec:      int(srv.opts.ResumeWindow / time.Second),
+			HeartbeatIntervalSec: int(srv.opts.HeartbeatInterval / time.Second),
+			Capabilities: messages.WelcomeCapabilities{
+				Encodings: []string{"json"},
+				Features:  feats,
+				Agents:    srv.inventory(),
+			},
+		}
+		wenv, err := arcp.NewEnvelope(messages.TypeSessionWelcome, &welcome)
+		if err != nil {
+			return nil, err
+		}
+		wenv.SessionID = entry.sessionID
+		if err := t.Send(ctx, wenv); err != nil {
+			return nil, fmt.Errorf("send welcome: %w", err)
+		}
+		sctx, cancel := context.WithCancel(ctx)
+		s := &session{
+			srv:         srv,
+			id:          entry.sessionID,
+			principal:   principal,
+			transport:   t,
+			features:    feats,
+			clientCap:   hello.Capabilities,
+			ctx:         sctx,
+			cancel:      cancel,
+			outbox:      make(chan arcp.Envelope, 128),
+			seq:         entry.seq,
+			resumeToken: newToken,
+		}
+		// Replay events the client may have missed. Iterate
+		// chronologically by EventSeq.
+		entries, _ := srv.log.Since(entry.sessionID, hello.Resume.LastEventSeq)
+		sort.Slice(entries, func(i, j int) bool {
+			return entries[i].EventSeq < entries[j].EventSeq
+		})
+		for _, e := range entries {
+			// Re-enqueue under the surviving session id; the seq
+			// already matches what the original transport stamped.
+			env := e.Envelope
+			env.SessionID = entry.sessionID
+			s.send(env)
+		}
+		return s, nil
+	}
 	sessionID := arcp.NewSessionID()
 	feats := arcp.IntersectFeatures(srv.features(), hello.Capabilities.Features)
+	resumeToken := arcp.NewULID()
 	welcome := messages.SessionWelcome{
 		Runtime:              messages.RuntimeInfo{Name: srv.opts.Name, Version: srv.opts.Version},
-		ResumeToken:          arcp.NewULID(),
+		ResumeToken:          resumeToken,
 		ResumeWindowSec:      int(srv.opts.ResumeWindow / time.Second),
 		HeartbeatIntervalSec: int(srv.opts.HeartbeatInterval / time.Second),
 		Capabilities: messages.WelcomeCapabilities{
@@ -91,15 +163,16 @@ func (srv *Server) handshake(ctx context.Context, t transport.Transport) (*sessi
 	}
 	sctx, cancel := context.WithCancel(ctx)
 	s := &session{
-		srv:       srv,
-		id:        sessionID,
-		principal: principal,
-		transport: t,
-		features:  feats,
-		clientCap: hello.Capabilities,
-		ctx:       sctx,
-		cancel:    cancel,
-		outbox:    make(chan arcp.Envelope, 128),
+		srv:         srv,
+		id:          sessionID,
+		principal:   principal,
+		transport:   t,
+		features:    feats,
+		clientCap:   hello.Capabilities,
+		ctx:         sctx,
+		cancel:      cancel,
+		outbox:      make(chan arcp.Envelope, 128),
+		resumeToken: resumeToken,
 	}
 	return s, nil
 }
@@ -285,6 +358,7 @@ func (s *session) dispatch(ctx context.Context, env arcp.Envelope) error {
 	case messages.TypeSessionListJobs:
 		return s.handleListJobs(ctx, env)
 	case messages.TypeSessionBye:
+		s.gracefulBye.Store(true)
 		s.cancel()
 		return nil
 	case messages.TypeJobSubmit:

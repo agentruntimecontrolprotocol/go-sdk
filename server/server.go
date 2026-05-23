@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"sort"
 	"sync"
@@ -40,8 +41,26 @@ type Server struct {
 	idStore idstore.Store
 	log     *eventlog.Memory
 
+	resumeMu sync.Mutex
+	resumes  map[string]*resumeEntry
+
 	closeOnce sync.Once
 	closeCh   chan struct{}
+}
+
+// resumeEntry is the per-session state kept across an unexpected
+// disconnect so a subsequent session.hello carrying a matching
+// resume_token can pick up the event stream where it left off. The
+// entry is removed on graceful session.bye and on successful resume,
+// and lazily purged after expiresAt.
+type resumeEntry struct {
+	sessionID   string
+	principal   string
+	features    []string
+	clientCap   messages.HelloCapabilities
+	seq         uint64
+	resumeToken string
+	expiresAt   time.Time
 }
 
 // New returns a Server initialised with opts.
@@ -54,8 +73,64 @@ func New(opts Options) *Server {
 		subs:    map[string][]*subscription{},
 		idStore: idstore.NewMemory(24 * time.Hour),
 		log:     eventlog.NewMemory(10_000),
+		resumes: map[string]*resumeEntry{},
 		closeCh: make(chan struct{}),
 	}
+}
+
+// stashResume records sess as resumable until now+ResumeWindow. Called
+// on non-graceful session exit (drop, heartbeat-lost, transport
+// error).
+func (s *Server) stashResume(sess *session, token string) {
+	s.resumeMu.Lock()
+	defer s.resumeMu.Unlock()
+	s.resumes[sess.id] = &resumeEntry{
+		sessionID:   sess.id,
+		principal:   sess.principal,
+		features:    append([]string(nil), sess.features...),
+		clientCap:   sess.clientCap,
+		seq:         sess.currentSeq(),
+		resumeToken: token,
+		expiresAt:   s.opts.Clock.Now().Add(s.opts.ResumeWindow),
+	}
+}
+
+// claimResume validates that a hello.Resume targets a known, unexpired
+// resume entry whose token matches. On success it deletes the entry
+// and returns it; on failure it returns a structured *arcp.Error.
+// Concurrently expired entries are purged opportunistically.
+func (s *Server) claimResume(req messages.ResumeRequest) (*resumeEntry, error) {
+	s.resumeMu.Lock()
+	defer s.resumeMu.Unlock()
+	now := s.opts.Clock.Now()
+	// Lazy purge of expired entries.
+	for id, e := range s.resumes {
+		if now.After(e.expiresAt) {
+			delete(s.resumes, id)
+			_ = s.log.Trim(id, ^uint64(0))
+		}
+	}
+	entry, ok := s.resumes[req.SessionID]
+	if !ok {
+		return nil, arcp.ErrResumeWindowExpired.WithMessage("session " + req.SessionID + " is not resumable")
+	}
+	if now.After(entry.expiresAt) {
+		delete(s.resumes, req.SessionID)
+		return nil, arcp.ErrResumeWindowExpired
+	}
+	if subtle.ConstantTimeCompare([]byte(entry.resumeToken), []byte(req.ResumeToken)) != 1 {
+		return nil, arcp.ErrUnauthenticated.WithMessage("resume_token mismatch")
+	}
+	delete(s.resumes, req.SessionID)
+	return entry, nil
+}
+
+// dropResume removes any resume entry for sessionID, for graceful
+// session.bye.
+func (s *Server) dropResume(sessionID string) {
+	s.resumeMu.Lock()
+	defer s.resumeMu.Unlock()
+	delete(s.resumes, sessionID)
 }
 
 // RegisterAgent registers fn under the bare name.
@@ -154,14 +229,23 @@ func (s *Server) inventory() []messages.AgentEntry {
 }
 
 // Accept runs one session over t. It blocks until t is closed, ctx is
-// cancelled, or an unrecoverable error fires.
+// cancelled, or an unrecoverable error fires. On a non-graceful exit
+// the session is recorded as resumable for ResumeWindow so a
+// subsequent session.hello carrying the matching resume_token can pick
+// up the event stream.
 func (s *Server) Accept(ctx context.Context, t transport.Transport) error {
 	sess, err := s.handshake(ctx, t)
 	if err != nil {
 		_ = t.Close()
 		return err
 	}
-	return sess.run(ctx)
+	runErr := sess.run(ctx)
+	if sess.gracefulBye.Load() {
+		s.dropResume(sess.id)
+	} else if sess.resumeToken != "" {
+		s.stashResume(sess, sess.resumeToken)
+	}
+	return runErr
 }
 
 // Close terminates all sessions and active jobs.

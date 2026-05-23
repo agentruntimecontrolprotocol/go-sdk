@@ -47,6 +47,7 @@ func Connect(ctx context.Context, t transport.Transport, opts Options) (*Client,
 			Encodings: []string{"json"},
 			Features:  o.Features,
 		},
+		Resume: o.Resume,
 	}
 	env, err := arcp.NewEnvelope(messages.TypeSessionHello, &hello)
 	if err != nil {
@@ -101,6 +102,11 @@ func (c *Client) Features() []string { return c.features }
 
 // HasFeature reports whether name was negotiated.
 func (c *Client) HasFeature(name string) bool { return arcp.HasFeature(c.features, name) }
+
+// HighestSeq returns the largest event_seq the client has seen on
+// this session, suitable as the LastEventSeq value when constructing
+// a messages.ResumeRequest for a subsequent reconnect.
+func (c *Client) HighestSeq() uint64 { return c.highSeq.Load() }
 
 // Close terminates the session.
 func (c *Client) Close(ctx context.Context) error {

@@ -137,6 +137,23 @@ fmt.Println("features:", cli.Features())
 // than that value.
 ```
 
+After an unexpected drop, dial a fresh transport and present the welcome's resume block back. The runtime mints a new token, reuses the original session id, and replays buffered events with `event_seq > LastEventSeq`:
+
+```go
+prior := messages.ResumeRequest{
+    SessionID:    cli.SessionID(),
+    ResumeToken:  cli.Welcome().ResumeToken,
+    LastEventSeq: cli.HighestSeq(),
+}
+t2, _ := transport.DialWebSocket(ctx, url, transport.WebSocketOptions{})
+cli2, err := client.Connect(ctx, t2, client.Options{
+    Token:  os.Getenv("ARCP_TOKEN"),
+    Resume: &prior,
+})
+```
+
+Graceful `Close` clears the resume state; only unexpected exits are resumable.
+
 ### Submitting jobs
 
 Submit a job with an agent (optionally version-pinned as `name@version`), an input, and an optional lease request, idempotency key, and runtime limit.
@@ -267,7 +284,7 @@ sub, err := observer.Subscribe(ctx, list.Jobs[0].JobID, client.SubscribeOptions{
 if err != nil {
     log.Fatal(err)
 }
-fmt.Println("subscribed; status =", sub.JobID())
+fmt.Printf("subscribed job=%s status=%s agent=%s\n", sub.JobID(), sub.CurrentStatus(), sub.Agent())
 
 for ev := range sub.Events() {
     fmt.Printf("[%s] %s\n", ev.Kind, string(ev.Body))
@@ -320,7 +337,7 @@ ARCP features this SDK negotiates during the `hello`/`welcome` handshake:
 
 ## Transport
 
-ARCP is transport-agnostic. This SDK ships a WebSocket transport (default), an NDJSON-over-stdio transport for in-process child runtimes, and an in-memory transport for tests and same-process embedders. WebSocket is the default for networked runtimes; stdio is used for in-process child runtimes. Select one by constructing the corresponding `transport.Transport` (`transport.DialWebSocket(ctx, url, opts)`, `transport.NewStdio(...)`, or `transport.NewMemoryPair()`) and passing it to `client.Connect(ctx, t, opts)`; the `middleware/nethttp` and `middleware/chi` sub-packages attach the WebSocket upgrade to an existing `*http.Server` or `chi.Router`.
+ARCP is transport-agnostic. This SDK ships a WebSocket transport (default), an NDJSON-over-stdio transport for in-process child runtimes, and an in-memory transport for tests and same-process embedders. WebSocket is the default for networked runtimes; stdio is used for in-process child runtimes. Select one by constructing the corresponding `transport.Transport` (`transport.DialWebSocket(ctx, url, opts)`, `transport.NewStdioTransport(in, out)`, or `transport.NewMemoryPair()`) and passing it to `client.Connect(ctx, t, opts)`. Host integration: `middleware/nethttp.NewHandler(srv, opts)` builds an `http.Handler` you can mount on an `*http.Server` or `http.ServeMux`; `middleware/chi.Mount(router, srv, opts)` attaches the same handler to a `chi.Router`.
 
 ## API reference
 

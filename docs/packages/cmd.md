@@ -2,12 +2,16 @@
 
 Import path: `github.com/agentruntimecontrolprotocol/go-sdk/cmd/arcp`
 
-The `arcp` command is a local utility for protocol smoke tests and
-manual workflows.
+The `arcp` command is a sample CLI for local smoke tests and manual
+protocol exercises. It registers a single `echo` agent on `serve`
+and submits one job on `submit`; applications normally import
+`client`, `server`, and `transport` directly rather than shelling out
+to the CLI.
 
 ```sh
-go run ./cmd/arcp --help
+go install github.com/agentruntimecontrolprotocol/go-sdk/cmd/arcp@latest
+arcp serve -h
+arcp submit -h
 ```
 
-Applications normally import `client`, `server`, and `transport`
-directly rather than shelling out to the CLI.
+See [cli.md](../cli.md) for the subcommand and flag reference.

@@ -39,5 +39,7 @@ log.Println(string(res.Output))
 ```
 
 Use WebSocket for process boundaries by mounting
-`middleware/nethttp.NewHandler` or `middleware/chi.NewHandler`, then
-dialing with `transport.DialWebSocket`.
+`middleware/nethttp.NewHandler` or `middleware/chi.Mount`, then
+dialing with `transport.DialWebSocket`. The chi sub-package exposes
+`Mount(router, srv, opts) *nethttp.Handler` instead of a separate
+constructor, so the same `Handler.Shutdown` is available either way.

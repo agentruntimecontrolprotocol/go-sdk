@@ -72,6 +72,69 @@ func (c *Client) Subscribe(ctx context.Context, jobID string, opts SubscribeOpti
 // JobID returns the subscribed job id.
 func (s *Subscription) JobID() string { return s.jobID }
 
+// CurrentStatus returns the job status reported in job.subscribed at
+// attach time. Live updates arrive on the event stream as status
+// events.
+func (s *Subscription) CurrentStatus() string {
+	if s.ack == nil {
+		return ""
+	}
+	return s.ack.CurrentStatus
+}
+
+// Agent returns the resolved "name@version" agent reported in
+// job.subscribed.
+func (s *Subscription) Agent() string {
+	if s.ack == nil {
+		return ""
+	}
+	return s.ack.Agent
+}
+
+// Lease returns the effective lease reported in job.subscribed.
+func (s *Subscription) Lease() arcp.Lease {
+	if s.ack == nil {
+		return nil
+	}
+	return s.ack.Lease
+}
+
+// ParentJobID returns the parent job id reported in job.subscribed,
+// when the subscribed job is a delegated child. Empty otherwise.
+func (s *Subscription) ParentJobID() string {
+	if s.ack == nil {
+		return ""
+	}
+	return s.ack.ParentJobID
+}
+
+// TraceID returns the trace id reported in job.subscribed.
+func (s *Subscription) TraceID() string {
+	if s.ack == nil {
+		return ""
+	}
+	return s.ack.TraceID
+}
+
+// SubscribedFrom returns the session-scoped event_seq at which the
+// runtime started feeding this subscription. Useful for clients that
+// later need to filter or replay.
+func (s *Subscription) SubscribedFrom() uint64 {
+	if s.ack == nil {
+		return 0
+	}
+	return s.ack.SubscribedFrom
+}
+
+// Replayed reports whether the runtime replayed buffered history
+// before live events began.
+func (s *Subscription) Replayed() bool {
+	if s.ack == nil {
+		return false
+	}
+	return s.ack.Replayed
+}
+
 // Events returns the live event channel.
 func (s *Subscription) Events() <-chan messages.JobEvent { return s.events }
 

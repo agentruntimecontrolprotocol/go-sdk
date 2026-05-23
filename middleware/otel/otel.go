@@ -4,8 +4,10 @@ package otel
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	arcp "github.com/agentruntimecontrolprotocol/go-sdk"
+	"github.com/agentruntimecontrolprotocol/go-sdk/messages"
 	"github.com/agentruntimecontrolprotocol/go-sdk/transport"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -84,6 +86,17 @@ func (t *otelTransport) Send(ctx context.Context, env arcp.Envelope) error {
 
 // Recv extracts trace context from env.Extensions and starts a
 // matching span when configured.
+//
+// Spans emitted depend on Options:
+//   - FrameSpans:    one short-lived span per inbound envelope
+//   - JobSpans:      one span per job-typed envelope ("job.submit",
+//                    "job.accepted", "job.result", "job.error",
+//                    "job.cancel", "job.subscribed")
+//   - ToolCallSpans: one span per inbound job.event whose Kind is
+//                    "tool_call" or "tool_result"
+//
+// All spans are started and ended immediately so they appear as
+// events on the active trace, not as long-running parents.
 func (t *otelTransport) Recv(ctx context.Context) (arcp.Envelope, error) {
 	env, err := t.inner.Recv(ctx)
 	if err != nil {
@@ -102,6 +115,35 @@ func (t *otelTransport) Recv(ctx context.Context) (arcp.Envelope, error) {
 			attribute.String("arcp.type", env.Type),
 		)
 		span.End()
+	}
+	if t.opts.JobSpans && strings.HasPrefix(env.Type, "job.") {
+		_, span := t.tracer.Start(ctx, env.Type)
+		attrs := []attribute.KeyValue{
+			attribute.String("arcp.session_id", env.SessionID),
+			attribute.String("arcp.type", env.Type),
+		}
+		if env.JobID != "" {
+			attrs = append(attrs, attribute.String("arcp.job_id", env.JobID))
+		}
+		if env.TraceID != "" {
+			attrs = append(attrs, attribute.String("arcp.trace_id", env.TraceID))
+		}
+		span.SetAttributes(attrs...)
+		span.End()
+	}
+	if t.opts.ToolCallSpans && env.Type == messages.TypeJobEvent {
+		var ev messages.JobEvent
+		if json.Unmarshal(env.Payload, &ev) == nil {
+			if ev.Kind == messages.KindToolCall || ev.Kind == messages.KindToolResult {
+				_, span := t.tracer.Start(ctx, "arcp."+ev.Kind)
+				span.SetAttributes(
+					attribute.String("arcp.session_id", env.SessionID),
+					attribute.String("arcp.job_id", env.JobID),
+					attribute.String("arcp.event.kind", ev.Kind),
+				)
+				span.End()
+			}
+		}
 	}
 	return env, nil
 }
