@@ -90,10 +90,10 @@ func (t *otelTransport) Send(ctx context.Context, env arcp.Envelope) error {
 // Spans emitted depend on Options:
 //   - FrameSpans:    one short-lived span per inbound envelope
 //   - JobSpans:      one span per job-typed envelope ("job.submit",
-//                    "job.accepted", "job.result", "job.error",
-//                    "job.cancel", "job.subscribed")
+//     "job.accepted", "job.result", "job.error",
+//     "job.cancel", "job.subscribed")
 //   - ToolCallSpans: one span per inbound job.event whose Kind is
-//                    "tool_call" or "tool_result"
+//     "tool_call" or "tool_result"
 //
 // All spans are started and ended immediately so they appear as
 // events on the active trace, not as long-running parents.
