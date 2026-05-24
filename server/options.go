@@ -19,13 +19,14 @@ type Options struct {
 	// Version is the runtime's advertised version.
 	Version string
 	// HeartbeatInterval seeds heartbeat_interval_sec in welcome. Zero
-	// disables heartbeats unless the client negotiates them; default
-	// is 30s.
+	// is replaced with the 30s default in withDefaults; omit the
+	// heartbeat feature if you need to suppress heartbeats entirely.
 	HeartbeatInterval time.Duration
 	// ResumeWindow seeds resume_window_sec; default 600s.
 	ResumeWindow time.Duration
-	// Verifier authenticates session.hello tokens. nil accepts no
-	// tokens.
+	// Verifier authenticates session.hello tokens. When nil, the
+	// runtime accepts the session and uses hello.Client.Name as the
+	// principal for anonymous/local mode.
 	Verifier auth.Verifier
 	// Logger is the slog.Logger used by the runtime. nil uses
 	// slog.Default().
