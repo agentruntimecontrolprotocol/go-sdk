@@ -18,23 +18,31 @@ type Options struct {
 	Name string
 	// Version is the runtime's advertised version.
 	Version string
-	// HeartbeatInterval seeds heartbeat_interval_sec in welcome. Zero
-	// is replaced with the 30s default in withDefaults; omit the
-	// heartbeat feature if you need to suppress heartbeats entirely.
+	// HeartbeatInterval seeds heartbeat_interval_sec in welcome and
+	// drives both the outbound session.ping ticker and the inbound
+	// watchdog (which expires at 2*HeartbeatInterval of silence). Zero
+	// is replaced with the 30s default in withDefaults; to suppress
+	// heartbeats entirely, omit the "heartbeat" feature from
+	// Options.Features.
 	HeartbeatInterval time.Duration
 	// ResumeWindow seeds resume_window_sec; default 600s.
 	ResumeWindow time.Duration
 	// Verifier authenticates session.hello tokens. When nil, the
-	// runtime accepts the session and uses hello.Client.Name as the
-	// principal for anonymous/local mode.
+	// runtime ACCEPTS the session in unauthenticated mode and uses
+	// hello.Client.Name as the principal. This is intended for local
+	// development and tests; production deployments must set a
+	// Verifier.
 	Verifier auth.Verifier
 	// Logger is the slog.Logger used by the runtime. nil uses
 	// slog.Default().
 	Logger *slog.Logger
 	// Clock is the time source. nil uses clock.Real().
 	Clock clock.Clock
-	// AckLagThreshold is the number of unacked events that triggers a
-	// back_pressure status emission. Zero disables.
+	// AckLagThreshold is the number of unacknowledged events that
+	// triggers a single back_pressure status job.event per affected
+	// job. The event is emitted at most once per breach; the next
+	// breach is only re-armed after the client acks back below the
+	// threshold. Zero disables.
 	AckLagThreshold uint64
 	// Features overrides the advertised feature list. Empty uses the
 	// SDK default.

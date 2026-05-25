@@ -58,16 +58,33 @@ type Handler struct {
 	mu     sync.Mutex
 	active map[uint64]*websocket.Conn
 	nextID uint64
+	// drained is signalled (closed and reopened) every time a
+	// connection is removed from active so Shutdown can wake without
+	// polling. Set by removeConn; replaced under mu.
+	drained chan struct{}
 }
 
 // NewHandler returns a Handler that upgrades requests on opts.Path
 // to WebSocket and serves them with srv.
 func NewHandler(srv *server.Server, opts Options) *Handler {
 	return &Handler{
-		opts:   opts.withDefaults(),
-		srv:    srv,
-		active: map[uint64]*websocket.Conn{},
+		opts:    opts.withDefaults(),
+		srv:     srv,
+		active:  map[uint64]*websocket.Conn{},
+		drained: make(chan struct{}),
 	}
+}
+
+// removeConn deletes id from active and signals any Shutdown waiter
+// that one connection has drained. The drained channel is replaced
+// under the lock so subsequent Shutdown attempts get a fresh signal.
+func (h *Handler) removeConn(id uint64) {
+	h.mu.Lock()
+	delete(h.active, id)
+	prev := h.drained
+	h.drained = make(chan struct{})
+	h.mu.Unlock()
+	close(prev)
 }
 
 // ServeHTTP implements http.Handler.
@@ -98,11 +115,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	id := h.nextID
 	h.active[id] = conn
 	h.mu.Unlock()
-	defer func() {
-		h.mu.Lock()
-		delete(h.active, id)
-		h.mu.Unlock()
-	}()
+	defer h.removeConn(id)
 	if h.opts.PingInterval > 0 {
 		pingCtx, cancelPing := context.WithCancel(r.Context())
 		defer cancelPing()
@@ -134,7 +147,10 @@ func pingLoop(ctx context.Context, conn *websocket.Conn, interval time.Duration)
 }
 
 // Shutdown closes every active WebSocket with status 1001 (Going
-// Away) and waits for ctx to expire.
+// Away) and waits until the active connection map is empty or ctx
+// expires. Returns nil when all connections drain before the deadline
+// and ctx.Err when the context expires. Calling Shutdown on a handler
+// with no active connections returns immediately with nil.
 func (h *Handler) Shutdown(ctx context.Context) error {
 	h.mu.Lock()
 	conns := make([]*websocket.Conn, 0, len(h.active))
@@ -145,8 +161,21 @@ func (h *Handler) Shutdown(ctx context.Context) error {
 	for _, c := range conns {
 		_ = c.Close(websocket.StatusGoingAway, "shutdown")
 	}
-	<-ctx.Done()
-	return nil
+	for {
+		h.mu.Lock()
+		n := len(h.active)
+		drained := h.drained
+		h.mu.Unlock()
+		if n == 0 {
+			return nil
+		}
+		select {
+		case <-drained:
+			// Loop and recheck active count.
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 func hostAllowed(hostHeader string, allowed []string) bool {

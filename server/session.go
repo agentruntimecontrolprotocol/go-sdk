@@ -37,11 +37,20 @@ type session struct {
 	sendMu       sync.Mutex
 	outboxClosed bool
 
-	seqMu sync.Mutex
-	seq   uint64
+	// seq is the per-session-id event_seq allocator. It is shared
+	// across this session struct and any successor created by resume
+	// so events emitted by a job that survives a disconnect cannot
+	// collide with events emitted by the resumed session.
+	seq *seqAlloc
 
 	highMu sync.Mutex
 	high   uint64 // last_processed_seq from session.ack
+
+	// backPressureArmed reports whether the next ack-lag breach should
+	// emit a status event. It is true at session start, set to false
+	// when an event fires, and re-armed when the lag drops back below
+	// the threshold.
+	backPressureArmed atomic.Bool
 
 	heartbeatLost atomic.Bool
 	// gracefulBye is set when the client (or server) sends session.bye.
@@ -111,6 +120,8 @@ func (srv *Server) handshake(ctx context.Context, t transport.Transport) (*sessi
 			return nil, fmt.Errorf("send welcome: %w", err)
 		}
 		sctx, cancel := context.WithCancel(ctx)
+		alloc := srv.allocFor(entry.sessionID)
+		alloc.setIfGreater(entry.seq)
 		s := &session{
 			srv:         srv,
 			id:          entry.sessionID,
@@ -121,9 +132,10 @@ func (srv *Server) handshake(ctx context.Context, t transport.Transport) (*sessi
 			ctx:         sctx,
 			cancel:      cancel,
 			outbox:      make(chan arcp.Envelope, 128),
-			seq:         entry.seq,
+			seq:         alloc,
 			resumeToken: newToken,
 		}
+		s.backPressureArmed.Store(true)
 		// Replay events the client may have missed. Iterate
 		// chronologically by EventSeq.
 		entries, _ := srv.log.Since(entry.sessionID, hello.Resume.LastEventSeq)
@@ -172,8 +184,10 @@ func (srv *Server) handshake(ctx context.Context, t transport.Transport) (*sessi
 		ctx:         sctx,
 		cancel:      cancel,
 		outbox:      make(chan arcp.Envelope, 128),
+		seq:         srv.allocFor(sessionID),
 		resumeToken: resumeToken,
 	}
+	s.backPressureArmed.Store(true)
 	return s, nil
 }
 
@@ -191,34 +205,56 @@ func (s *session) hasFeature(name string) bool {
 	return arcp.HasFeature(s.features, name)
 }
 
-// nextSeq allocates the next session-scoped event_seq.
+// nextSeq allocates the next session-scoped event_seq from the
+// session-id-shared allocator so the counter survives reconnects.
 func (s *session) nextSeq() uint64 {
-	s.seqMu.Lock()
-	defer s.seqMu.Unlock()
-	s.seq++
-	return s.seq
+	return s.seq.next()
 }
 
 // currentSeq returns the most recently allocated seq without consuming
 // one.
 func (s *session) currentSeq() uint64 {
-	s.seqMu.Lock()
-	defer s.seqMu.Unlock()
-	return s.seq
+	return s.seq.current()
 }
 
-// send enqueues env on the outbox.
+// send enqueues env on the outbox. Sequenced events are also persisted
+// to the event log immediately so jobs that outlive the transport
+// (the resume contract) still produce replayable history. Best-effort
+// transport delivery only happens when the outbox is live.
 func (s *session) send(env arcp.Envelope) {
 	env.SessionID = s.id
+	s.persistOutbound(env)
 	s.sendMu.Lock()
-	defer s.sendMu.Unlock()
-	if s.outboxClosed {
+	closed := s.outboxClosed
+	if !closed {
+		select {
+		case s.outbox <- env:
+		case <-s.ctx.Done():
+		}
+	}
+	s.sendMu.Unlock()
+	if !closed {
+		s.maybeEmitBackPressure(env.JobID, env.EventSeq)
+	}
+}
+
+// persistOutbound appends env to the per-session event log when it
+// carries a session-scoped event sequence and is not a credential
+// rotation (which is not replayable for security reasons).
+func (s *session) persistOutbound(env arcp.Envelope) {
+	if env.EventSeq == 0 {
 		return
 	}
-	select {
-	case s.outbox <- env:
-	case <-s.ctx.Done():
+	if isCredentialRotation(env) {
+		return
 	}
+	_ = s.srv.log.Append(eventlog.Entry{
+		SessionID: s.id,
+		EventSeq:  env.EventSeq,
+		JobID:     env.JobID,
+		StoredAt:  s.srv.opts.Clock.Now(),
+		Envelope:  env,
+	})
 }
 
 func (s *session) closeOutbox() {
@@ -231,7 +267,10 @@ func (s *session) closeOutbox() {
 	close(s.outbox)
 }
 
-// writeLoop drains outbox; one writer per session.
+// writeLoop drains outbox; one writer per session. The event log is
+// populated by send/persistOutbound at enqueue time, not here, so
+// events emitted while the transport is down still produce log
+// entries.
 func (s *session) writeLoop() {
 	defer s.wg.Done()
 	for {
@@ -246,27 +285,60 @@ func (s *session) writeLoop() {
 				}
 				return
 			}
-			s.recordOutbound(env)
 		case <-s.ctx.Done():
 			return
 		}
 	}
 }
 
-func (s *session) recordOutbound(env arcp.Envelope) {
-	if env.EventSeq == 0 {
+// maybeEmitBackPressure emits a single back_pressure status event when
+// the gap between the outbound event sequence and the highest ack
+// crosses Options.AckLagThreshold. The breach is coalesced: subsequent
+// events do not re-fire until handleAck observes the gap drop back
+// below the threshold. The emitted event itself bumps the seq counter
+// but re-entering this function from its own send is harmless because
+// backPressureArmed is already false until the next ack re-arms.
+func (s *session) maybeEmitBackPressure(jobID string, seq uint64) {
+	threshold := s.srv.opts.AckLagThreshold
+	if threshold == 0 || !s.hasFeature("ack") {
 		return
 	}
-	if isCredentialRotation(env) {
+	s.highMu.Lock()
+	high := s.high
+	s.highMu.Unlock()
+	if seq <= high || seq-high < threshold {
 		return
 	}
-	_ = s.srv.log.Append(eventlog.Entry{
-		SessionID: s.id,
-		EventSeq:  env.EventSeq,
-		JobID:     env.JobID,
-		StoredAt:  s.srv.opts.Clock.Now(),
-		Envelope:  env,
-	})
+	if !s.backPressureArmed.CompareAndSwap(true, false) {
+		return
+	}
+	body := messages.StatusBody{
+		Phase:   "back_pressure",
+		Message: "unacked event lag exceeded threshold",
+		Details: map[string]any{
+			"threshold":   threshold,
+			"current_seq": seq,
+			"last_ack":    high,
+		},
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		s.backPressureArmed.Store(true)
+		return
+	}
+	ev := messages.JobEvent{
+		Kind: messages.KindStatus,
+		TS:   s.srv.opts.Clock.Now(),
+		Body: raw,
+	}
+	env, err := arcp.NewEnvelope(messages.TypeJobEvent, &ev)
+	if err != nil {
+		s.backPressureArmed.Store(true)
+		return
+	}
+	env.JobID = jobID
+	env.EventSeq = s.nextSeq()
+	s.send(env)
 }
 
 func isCredentialRotation(env arcp.Envelope) bool {
@@ -410,8 +482,16 @@ func (s *session) handleAck(env arcp.Envelope) error {
 	if ack.LastProcessedSeq > s.high {
 		s.high = ack.LastProcessedSeq
 	}
+	high := s.high
 	s.highMu.Unlock()
 	_ = s.srv.log.Trim(s.id, ack.LastProcessedSeq)
+	// Re-arm back_pressure once the client has caught back up below
+	// the threshold; the next breach will fire a fresh status event.
+	if threshold := s.srv.opts.AckLagThreshold; threshold > 0 {
+		if s.currentSeq()-high < threshold {
+			s.backPressureArmed.Store(true)
+		}
+	}
 	return nil
 }
 
@@ -469,7 +549,11 @@ func (s *session) handleJobSubmit(ctx context.Context, env arcp.Envelope) error 
 			JobID:     job.id,
 			CreatedAt: s.srv.opts.Clock.Now(),
 		})
-		if err == nil && !fresh {
+		if err != nil {
+			s.srv.unregisterJob(job.id)
+			return s.sendError(arcp.Code(err), "idempotency store error: "+err.Error())
+		}
+		if !fresh {
 			s.srv.unregisterJob(job.id)
 			return s.sendError(arcp.CodeDuplicateKey, "idempotency key already used for job "+entry.JobID)
 		}

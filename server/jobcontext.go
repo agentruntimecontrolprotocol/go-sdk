@@ -55,6 +55,17 @@ func (jc *JobContext) ValidateLeaseOp(cap arcp.Capability, target string) error 
 	return jc.job.lease.ValidateOp(jc.job.session.srv.opts.Clock.Now(), cap, target)
 }
 
+// ReserveBudget atomically validates the lease op and reserves the
+// budget debit in a single step. Use this instead of the
+// ValidateLeaseOp + Metric pair when the work has a known cost up
+// front, so concurrent callers cannot all pass validation before any
+// debit has applied. The remaining balance for debit.Currency is
+// returned on success; on over-budget the counter is unchanged and
+// ErrBudgetExhausted is returned.
+func (jc *JobContext) ReserveBudget(cap arcp.Capability, target string, debit arcp.BudgetAmount) (float64, error) {
+	return jc.job.lease.ValidateAndDebit(jc.job.session.srv.opts.Clock.Now(), cap, target, debit)
+}
+
 // Log emits a "log" job event.
 func (jc *JobContext) Log(level slog.Level, msg string, attrs ...slog.Attr) {
 	body := messages.LogBody{Level: level.String(), Message: msg}
@@ -202,6 +213,10 @@ func (jc *JobContext) Progress(current uint64, total uint64, units, message stri
 // StreamResult opens a writer that emits result_chunk events. Close
 // terminates the stream; the runtime emits the final job.result with
 // result_id and result_size when the AgentFunc returns.
+//
+// Each Write is split into one or more result_chunk events whose Body
+// is no larger than Options.ChunkSize (default 1 MiB). The total
+// streamed payload is capped by Options.MaxResultBytes.
 func (jc *JobContext) StreamResult(encoding string) (io.WriteCloser, error) {
 	if encoding == "" {
 		encoding = "utf8"
@@ -214,11 +229,16 @@ func (jc *JobContext) StreamResult(encoding string) (io.WriteCloser, error) {
 	if jc.streamed != nil {
 		return nil, arcp.ErrInvalidRequest.WithMessage("StreamResult called twice on the same job")
 	}
+	chunkSize := jc.job.session.srv.opts.ChunkSize
+	if chunkSize <= 0 {
+		return nil, arcp.ErrInternalError.WithMessage("server ChunkSize must be > 0")
+	}
 	res := &streamedResult{
-		jc:       jc,
-		resultID: arcp.NewResultID(),
-		encoding: encoding,
-		max:      jc.job.session.srv.opts.MaxResultBytes,
+		jc:        jc,
+		resultID:  arcp.NewResultID(),
+		encoding:  encoding,
+		max:       jc.job.session.srv.opts.MaxResultBytes,
+		chunkSize: chunkSize,
 	}
 	jc.streamed = res
 	return res, nil
@@ -248,17 +268,21 @@ func (jc *JobContext) emitEvent(kind string, body any) {
 }
 
 type streamedResult struct {
-	jc       *JobContext
-	resultID string
-	encoding string
-	mu       sync.Mutex
-	seq      uint64
-	size     uint64
-	max      int64
-	closed   bool
+	jc        *JobContext
+	resultID  string
+	encoding  string
+	mu        sync.Mutex
+	seq       uint64
+	size      uint64
+	max       int64
+	chunkSize int64
+	closed    bool
 }
 
-// Write emits one result_chunk event.
+// Write splits p into one or more result_chunk events, each no larger
+// than the server's configured ChunkSize. Returns len(p) on success;
+// no partial accounting on the MaxResultBytes cap (the entire write is
+// rejected if it would exceed the cap).
 func (r *streamedResult) Write(p []byte) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -268,23 +292,39 @@ func (r *streamedResult) Write(p []byte) (int, error) {
 	if r.max > 0 && int64(r.size)+int64(len(p)) > r.max {
 		return 0, arcp.ErrInternalError.WithMessage(fmt.Sprintf("streamed result exceeds %d bytes", r.max))
 	}
-	var data string
-	switch r.encoding {
-	case "utf8":
-		data = string(p)
-	case "base64":
-		data = base64.StdEncoding.EncodeToString(p)
+	if len(p) == 0 {
+		return 0, nil
 	}
-	body := messages.ResultChunkBody{
-		ResultID: r.resultID,
-		ChunkSeq: r.seq,
-		Data:     data,
-		Encoding: r.encoding,
-		More:     true,
+	limit := int(r.chunkSize)
+	if limit <= 0 {
+		limit = len(p)
 	}
-	r.jc.emitEvent(messages.KindResultChunk, body)
-	r.seq++
-	r.size += uint64(len(p))
+	written := 0
+	for written < len(p) {
+		end := written + limit
+		if end > len(p) {
+			end = len(p)
+		}
+		segment := p[written:end]
+		var data string
+		switch r.encoding {
+		case "utf8":
+			data = string(segment)
+		case "base64":
+			data = base64.StdEncoding.EncodeToString(segment)
+		}
+		body := messages.ResultChunkBody{
+			ResultID: r.resultID,
+			ChunkSeq: r.seq,
+			Data:     data,
+			Encoding: r.encoding,
+			More:     true,
+		}
+		r.jc.emitEvent(messages.KindResultChunk, body)
+		r.seq++
+		r.size += uint64(len(segment))
+		written = end
+	}
 	return len(p), nil
 }
 

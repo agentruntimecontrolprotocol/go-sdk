@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"sync"
+	"time"
 
 	arcp "github.com/agentruntimecontrolprotocol/go-sdk"
 	"github.com/agentruntimecontrolprotocol/go-sdk/messages"
@@ -18,13 +19,17 @@ type SubscribeOptions struct {
 type Subscription struct {
 	client *Client
 	jobID  string
+	// key is the registration key in client.subscribers; held so Close
+	// can remove the entry. Empty for not-yet-registered subscriptions.
+	key string
 
-	mu     sync.Mutex
-	events chan messages.JobEvent
-	doneCh chan struct{}
-	err    error
-	ack    *messages.JobSubscribed
-	ackCh  chan messages.JobSubscribed
+	mu        sync.Mutex
+	events    chan messages.JobEvent
+	doneCh    chan struct{}
+	err       error
+	ack       *messages.JobSubscribed
+	ackCh     chan messages.JobSubscribed
+	closeOnce sync.Once
 }
 
 // Subscribe attaches the current session to jobID. The runtime
@@ -45,17 +50,20 @@ func (c *Client) Subscribe(ctx context.Context, jobID string, opts SubscribeOpti
 	}
 	env.SessionID = c.sessionID
 	env.JobID = jobID
+	key := jobID + ":" + arcp.NewULID()
 	sub := &Subscription{
 		client: c,
 		jobID:  jobID,
+		key:    key,
 		events: make(chan messages.JobEvent, 128),
 		doneCh: make(chan struct{}),
 		ackCh:  make(chan messages.JobSubscribed, 1),
 	}
 	c.mu.Lock()
-	c.subscribers[jobID+":"+arcp.NewULID()] = sub
+	c.subscribers[key] = sub
 	c.mu.Unlock()
 	if err := c.transport.Send(ctx, env); err != nil {
+		c.removeSubscriber(key)
 		return nil, err
 	}
 	select {
@@ -63,8 +71,10 @@ func (c *Client) Subscribe(ctx context.Context, jobID string, opts SubscribeOpti
 		sub.ack = &ack
 		return sub, nil
 	case <-ctx.Done():
+		c.removeSubscriber(key)
 		return nil, ctx.Err()
 	case <-c.ctx.Done():
+		c.removeSubscriber(key)
 		return nil, arcp.ErrInternalError.WithMessage("client closed")
 	}
 }
@@ -148,18 +158,26 @@ func (s *Subscription) Err() error {
 	return s.err
 }
 
-// Close detaches the subscription.
+// Close detaches the subscription. Close is idempotent: subsequent
+// calls return nil and do not re-send job.unsubscribe.
 func (s *Subscription) Close(ctx context.Context) error {
-	body := messages.JobUnsubscribe{JobID: s.jobID}
-	env, err := arcp.NewEnvelope(messages.TypeJobUnsubscribe, &body)
-	if err != nil {
-		return err
-	}
-	env.SessionID = s.client.sessionID
-	env.JobID = s.jobID
-	_ = s.client.transport.Send(ctx, env)
-	s.close(nil)
-	return nil
+	var sendErr error
+	s.closeOnce.Do(func() {
+		body := messages.JobUnsubscribe{JobID: s.jobID}
+		env, err := arcp.NewEnvelope(messages.TypeJobUnsubscribe, &body)
+		if err != nil {
+			sendErr = err
+			return
+		}
+		env.SessionID = s.client.sessionID
+		env.JobID = s.jobID
+		_ = s.client.transport.Send(ctx, env)
+		if s.key != "" {
+			s.client.removeSubscriber(s.key)
+		}
+		s.close(nil)
+	})
+	return sendErr
 }
 
 func (s *Subscription) acknowledged(payload messages.JobSubscribed) {
@@ -169,10 +187,48 @@ func (s *Subscription) acknowledged(payload messages.JobSubscribed) {
 	}
 }
 
+// push enqueues ev for the consumer. It blocks while the consumer is
+// slow rather than silently dropping the envelope, but returns
+// immediately if the subscription is already closed or the client's
+// context fires. If the consumer never drains, push closes the
+// subscription with a structured overflow error after the configured
+// EventDeliveryTimeout. The default ordering and result_chunk
+// guarantees promised by the README are preserved.
 func (s *Subscription) push(ev messages.JobEvent) {
+	if s.isClosed() {
+		return
+	}
+	timeout := s.client.opts.EventDeliveryTimeout
+	if timeout <= 0 {
+		// Block indefinitely (subject to client ctx); the consumer is
+		// expected to drain. This matches the "lossless" contract.
+		select {
+		case s.events <- ev:
+		case <-s.doneCh:
+		case <-s.client.ctx.Done():
+		}
+		return
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case s.events <- ev:
+	case <-s.doneCh:
+	case <-s.client.ctx.Done():
+	case <-timer.C:
+		s.close(arcp.ErrInternalError.WithMessage("subscription overflow: consumer did not drain within EventDeliveryTimeout"))
+		if s.key != "" {
+			s.client.removeSubscriber(s.key)
+		}
+	}
+}
+
+func (s *Subscription) isClosed() bool {
+	select {
+	case <-s.doneCh:
+		return true
 	default:
+		return false
 	}
 }
 

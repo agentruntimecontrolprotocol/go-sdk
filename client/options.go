@@ -35,6 +35,13 @@ type Options struct {
 	// with seq greater than LastEventSeq before live traffic resumes.
 	// The token is single-use; the next welcome carries a fresh one.
 	Resume *messages.ResumeRequest
+	// EventDeliveryTimeout bounds how long the dispatcher will block
+	// trying to deliver a single envelope to a slow JobHandle or
+	// Subscription consumer before closing it with an overflow error.
+	// Zero means block indefinitely (the lossless default — the
+	// consumer is expected to drain). Set this for back-pressure
+	// sensitive callers that must not stall the read loop.
+	EventDeliveryTimeout time.Duration
 }
 
 func (o Options) withDefaults() Options {

@@ -48,7 +48,10 @@ type Job struct {
 }
 
 func newJob(s *session, canonicalAgent string, req messages.JobSubmit, fn AgentFunc, traceID string) *Job {
-	ctx, cancel := context.WithCancel(s.ctx)
+	// Jobs are rooted in the server's lifetime context so they survive
+	// transport disconnects; only Server.Close, job.cancel,
+	// max_runtime_sec, lease expiry, or terminal completion ends them.
+	ctx, cancel := context.WithCancel(s.srv.lifeCtx)
 	id := arcp.NewJobID()
 	var expiresAt *time.Time
 	if req.LeaseConstraints != nil && req.LeaseConstraints.ExpiresAt != nil {

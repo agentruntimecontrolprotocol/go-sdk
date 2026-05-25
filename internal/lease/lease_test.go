@@ -3,6 +3,7 @@ package lease_test
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -59,34 +60,51 @@ func TestBudgetAtomicity(t *testing.T) {
 		arcp.CapToolCall:   {"search.*"},
 		arcp.CapCostBudget: {"USD:1.00"},
 	}, nil)
-	var success int
-	var failure int
-	var mu sync.Mutex
+	const charge = 0.50
+	const expected = 2 // 1.00 / 0.50
+	var success int64
+	var exhausted int64
 	var wg sync.WaitGroup
-	wg.Add(64)
-	for i := 0; i < 64; i++ {
+	const goroutines = 128
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
 		go func() {
 			defer wg.Done()
-			err := st.ValidateOp(time.Now(), arcp.CapToolCall, "search.web")
-			if err != nil && !errors.Is(err, arcp.ErrBudgetExhausted) {
-				return
-			}
-			if err == nil {
-				if _, err := st.Debit("USD", 0.50); err != nil {
-					return
-				}
-				mu.Lock()
-				success++
-				mu.Unlock()
-			} else {
-				mu.Lock()
-				failure++
-				mu.Unlock()
+			_, err := st.ValidateAndDebit(time.Now(), arcp.CapToolCall, "search.web", arcp.BudgetAmount{Currency: "USD", Value: charge})
+			switch {
+			case err == nil:
+				atomic.AddInt64(&success, 1)
+			case errors.Is(err, arcp.ErrBudgetExhausted):
+				atomic.AddInt64(&exhausted, 1)
+			default:
+				t.Errorf("unexpected error: %v", err)
 			}
 		}()
 	}
 	wg.Wait()
-	if success > 2 {
-		t.Fatalf("budget allowed %d charges, want ≤ 2", success)
+	if got := atomic.LoadInt64(&success); got != expected {
+		t.Fatalf("budget allowed %d charges, want exactly %d", got, expected)
+	}
+	if got := atomic.LoadInt64(&exhausted); got != goroutines-expected {
+		t.Fatalf("got %d budget-exhausted rejections, want %d", got, goroutines-expected)
+	}
+	// And no debit drove counters negative.
+	if rem := st.Budget()["USD"]; rem != 0 {
+		t.Fatalf("remaining budget is %v, want 0", rem)
+	}
+}
+
+func TestDebitRejectsOverspend(t *testing.T) {
+	st := lease.NewState(arcp.Lease{
+		arcp.CapCostBudget: {"USD:1.00"},
+	}, nil)
+	if _, err := st.Debit("USD", 0.60); err != nil {
+		t.Fatalf("first debit: %v", err)
+	}
+	if _, err := st.Debit("USD", 0.60); !errors.Is(err, arcp.ErrBudgetExhausted) {
+		t.Fatalf("want ErrBudgetExhausted, got %v", err)
+	}
+	if rem := st.Budget()["USD"]; rem <= 0 {
+		t.Fatalf("rejected debit drove counter to %v, want positive", rem)
 	}
 }

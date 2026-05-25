@@ -44,8 +44,81 @@ type Server struct {
 	resumeMu sync.Mutex
 	resumes  map[string]*resumeEntry
 
+	// lifeCtx is the server-owned root context. It is cancelled
+	// exactly once, by Close, and is the parent of every accepted
+	// session and accepted job context. Decoupling job context from
+	// the submitting session context lets jobs continue running
+	// (and emitting into the event log) across an unexpected
+	// transport drop, which is what the resume contract promises.
+	lifeCtx    context.Context
+	lifeCancel context.CancelFunc
+
+	sessMu       sync.Mutex
+	sessions     map[*session]struct{}
+	sessionsDone chan struct{}
+
+	// seqAllocs holds the per-session-id event_seq counter. It is
+	// allocated at handshake and reused on resume so events emitted by
+	// jobs that survive a transport disconnect cannot collide with
+	// events emitted by the resumed session.
+	allocsMu  sync.Mutex
+	seqAllocs map[string]*seqAlloc
+
 	closeOnce sync.Once
 	closeCh   chan struct{}
+}
+
+// seqAlloc is the per-session-id monotonic event_seq counter shared
+// across the original session struct and any successor session
+// created by resume.
+type seqAlloc struct {
+	mu  sync.Mutex
+	val uint64
+}
+
+func (a *seqAlloc) next() uint64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.val++
+	return a.val
+}
+
+func (a *seqAlloc) current() uint64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.val
+}
+
+func (a *seqAlloc) setIfGreater(v uint64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if v > a.val {
+		a.val = v
+	}
+}
+
+// allocFor returns the seqAlloc for sessionID, creating one if absent.
+func (s *Server) allocFor(sessionID string) *seqAlloc {
+	s.allocsMu.Lock()
+	defer s.allocsMu.Unlock()
+	a, ok := s.seqAllocs[sessionID]
+	if !ok {
+		a = &seqAlloc{}
+		s.seqAllocs[sessionID] = a
+	}
+	return a
+}
+
+func (s *Server) dropAlloc(sessionID string) {
+	s.allocsMu.Lock()
+	defer s.allocsMu.Unlock()
+	delete(s.seqAllocs, sessionID)
+}
+
+// setIDStore replaces the server's idempotency store. Exported via a
+// test-only constructor below for fault injection.
+func (s *Server) setIDStore(store idstore.Store) {
+	s.idStore = store
 }
 
 // resumeEntry is the per-session state kept across an unexpected
@@ -66,21 +139,64 @@ type resumeEntry struct {
 // New returns a Server initialised with opts.
 func New(opts Options) *Server {
 	o := opts.withDefaults()
+	lifeCtx, lifeCancel := context.WithCancel(context.Background())
 	return &Server{
-		opts:    o,
-		agents:  map[string]*agentEntry{},
-		jobs:    map[string]*Job{},
-		subs:    map[string][]*subscription{},
-		idStore: idstore.NewMemory(24 * time.Hour),
-		log:     eventlog.NewMemory(10_000),
-		resumes: map[string]*resumeEntry{},
-		closeCh: make(chan struct{}),
+		opts:         o,
+		agents:       map[string]*agentEntry{},
+		jobs:         map[string]*Job{},
+		subs:         map[string][]*subscription{},
+		idStore:      idstore.NewMemory(24 * time.Hour),
+		log:          eventlog.NewMemory(10_000),
+		resumes:      map[string]*resumeEntry{},
+		lifeCtx:      lifeCtx,
+		lifeCancel:   lifeCancel,
+		sessions:     map[*session]struct{}{},
+		sessionsDone: make(chan struct{}),
+		seqAllocs:    map[string]*seqAlloc{},
+		closeCh:      make(chan struct{}),
+	}
+}
+
+// registerSession adds sess to the active set; returns false if the
+// server is already closed.
+func (s *Server) registerSession(sess *session) bool {
+	s.sessMu.Lock()
+	defer s.sessMu.Unlock()
+	select {
+	case <-s.closeCh:
+		return false
+	default:
+	}
+	s.sessions[sess] = struct{}{}
+	return true
+}
+
+func (s *Server) unregisterSession(sess *session) {
+	s.sessMu.Lock()
+	delete(s.sessions, sess)
+	last := len(s.sessions) == 0
+	closed := false
+	select {
+	case <-s.closeCh:
+		closed = true
+	default:
+	}
+	s.sessMu.Unlock()
+	if last && closed {
+		select {
+		case <-s.sessionsDone:
+		default:
+			close(s.sessionsDone)
+		}
 	}
 }
 
 // stashResume records sess as resumable until now+ResumeWindow. Called
 // on non-graceful session exit (drop, heartbeat-lost, transport
-// error).
+// error). The recorded seq is read from the shared per-session-id
+// allocator so a successor session takes over with a counter that
+// reflects every event a still-running job has emitted since the
+// transport dropped.
 func (s *Server) stashResume(sess *session, token string) {
 	s.resumeMu.Lock()
 	defer s.resumeMu.Unlock()
@@ -126,11 +242,14 @@ func (s *Server) claimResume(req messages.ResumeRequest) (*resumeEntry, error) {
 }
 
 // dropResume removes any resume entry for sessionID, for graceful
-// session.bye.
+// session.bye. The seq allocator is dropped too because no future
+// resume can reattach to this session id once it has been gracefully
+// closed.
 func (s *Server) dropResume(sessionID string) {
 	s.resumeMu.Lock()
-	defer s.resumeMu.Unlock()
 	delete(s.resumes, sessionID)
+	s.resumeMu.Unlock()
+	s.dropAlloc(sessionID)
 }
 
 // RegisterAgent registers fn under the bare name.
@@ -232,13 +351,20 @@ func (s *Server) inventory() []messages.AgentEntry {
 // cancelled, or an unrecoverable error fires. On a non-graceful exit
 // the session is recorded as resumable for ResumeWindow so a
 // subsequent session.hello carrying the matching resume_token can pick
-// up the event stream.
+// up the event stream. If Server.Close has already fired before
+// handshake completes, Accept returns ErrServerClosed without running
+// the session.
 func (s *Server) Accept(ctx context.Context, t transport.Transport) error {
 	sess, err := s.handshake(ctx, t)
 	if err != nil {
 		_ = t.Close()
 		return err
 	}
+	if !s.registerSession(sess) {
+		_ = t.Close()
+		return ErrServerClosed
+	}
+	defer s.unregisterSession(sess)
 	runErr := sess.run(ctx)
 	if sess.gracefulBye.Load() {
 		s.dropResume(sess.id)
@@ -248,9 +374,46 @@ func (s *Server) Accept(ctx context.Context, t transport.Transport) error {
 	return runErr
 }
 
-// Close terminates all sessions and active jobs.
+// ErrServerClosed is returned by Accept when Server.Close has already
+// fired.
+var ErrServerClosed = arcp.ErrInternalError.WithMessage("server closed")
+
+// Close terminates all active sessions and active jobs. It is
+// idempotent: subsequent calls are no-ops and return nil.
+//
+// Close cancels the server's lifetime context, which propagates to
+// every job context, then cancels each active session context (which
+// unblocks the per-session transport read loop) and closes its
+// transport. Close returns after every session's run loop has exited.
 func (s *Server) Close() error {
-	s.closeOnce.Do(func() { close(s.closeCh) })
+	first := false
+	s.closeOnce.Do(func() {
+		first = true
+		close(s.closeCh)
+		// Cancel every job: their contexts descend from lifeCtx.
+		s.lifeCancel()
+	})
+	if !first {
+		return nil
+	}
+	s.sessMu.Lock()
+	sessions := make([]*session, 0, len(s.sessions))
+	for sess := range s.sessions {
+		sessions = append(sessions, sess)
+	}
+	if len(sessions) == 0 {
+		select {
+		case <-s.sessionsDone:
+		default:
+			close(s.sessionsDone)
+		}
+	}
+	s.sessMu.Unlock()
+	for _, sess := range sessions {
+		sess.cancel()
+		_ = sess.transport.Close()
+	}
+	<-s.sessionsDone
 	return nil
 }
 

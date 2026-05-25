@@ -118,8 +118,62 @@ func (s *State) ValidateOp(now time.Time, cap arcp.Capability, target string) er
 	return nil
 }
 
+// ValidateAndDebit atomically checks capability, target, expiry, and
+// (when debit.Value > 0) reserves the budget under one lock. It returns
+// the remaining balance for debit.Currency on success. If applying the
+// debit would drive the counter negative, the counter is unchanged and
+// the call returns ErrBudgetExhausted. A zero-valued debit (Value == 0
+// or empty Currency) is treated as a pure validation.
+//
+// Callers that perform budgeted work — for example an agent invoking a
+// metered tool — should prefer this over the ValidateOp+Debit pair to
+// avoid the time-of-check / time-of-use window where many goroutines
+// can pass validation before the first debit reduces the shared
+// counter.
+func (s *State) ValidateAndDebit(now time.Time, cap arcp.Capability, target string, debit arcp.BudgetAmount) (float64, error) {
+	if s == nil {
+		return 0, arcp.ErrPermissionDenied.WithMessage("no lease in scope")
+	}
+	if debit.Value < 0 {
+		return 0, arcp.ErrInvalidRequest.WithMessage("debit value must be non-negative")
+	}
+	if s.expiresAt != nil && !now.Before(*s.expiresAt) {
+		return 0, arcp.ErrLeaseExpired.WithMessage("lease expired at " + s.expiresAt.Format(time.RFC3339))
+	}
+	if !s.matches(cap, target) {
+		return 0, arcp.ErrPermissionDenied.WithMessage("operation not permitted by lease")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.initialized) > 0 {
+		for cur, v := range s.counters {
+			if v <= 0 {
+				return 0, arcp.ErrBudgetExhausted.WithMessage("budget exhausted for " + string(cur))
+			}
+		}
+	}
+	if debit.Value == 0 || debit.Currency == "" {
+		// Pure validation; nothing to debit.
+		return s.counters[debit.Currency], nil
+	}
+	if _, ok := s.initialized[debit.Currency]; !ok {
+		// Currency is unbudgeted; debits against it are no-ops.
+		return 0, nil
+	}
+	if s.counters[debit.Currency]-debit.Value < 0 {
+		return s.counters[debit.Currency], arcp.ErrBudgetExhausted.WithMessage("budget exhausted for " + string(debit.Currency))
+	}
+	s.counters[debit.Currency] -= debit.Value
+	return s.counters[debit.Currency], nil
+}
+
 // Debit subtracts v from the named currency counter. Returns the
-// remaining balance and any error.
+// remaining balance and any error. If the debit would drive the
+// counter negative, the counter is unchanged and an
+// ErrBudgetExhausted is returned.
+//
+// New callers should prefer ValidateAndDebit so the check-then-debit
+// pair is atomic with the underlying capability validation.
 func (s *State) Debit(cur arcp.Currency, v float64) (float64, error) {
 	if v < 0 {
 		return 0, arcp.ErrInvalidRequest.WithMessage("debit value must be non-negative")
@@ -128,6 +182,9 @@ func (s *State) Debit(cur arcp.Currency, v float64) (float64, error) {
 	defer s.mu.Unlock()
 	if _, ok := s.initialized[cur]; !ok {
 		return 0, nil
+	}
+	if s.counters[cur]-v < 0 {
+		return s.counters[cur], arcp.ErrBudgetExhausted.WithMessage("budget exhausted for " + string(cur))
 	}
 	s.counters[cur] -= v
 	return s.counters[cur], nil

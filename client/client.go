@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	arcp "github.com/agentruntimecontrolprotocol/go-sdk"
 	"github.com/agentruntimecontrolprotocol/go-sdk/messages"
@@ -24,6 +25,12 @@ type Client struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	// submitMu serializes the submit send + job.accepted wait so the
+	// FIFO order of c.pending matches the order the runtime allocates
+	// job ids. Until the wire payload carries a request id, this is
+	// the only correlation guarantee available.
+	submitMu sync.Mutex
+
 	mu          sync.RWMutex
 	handles     map[string]*JobHandle
 	pending     []*JobHandle
@@ -34,6 +41,11 @@ type Client struct {
 
 	highSeq atomic.Uint64
 	lastAck atomic.Uint64
+
+	// ackTickerStop signals the auto-ack interval flusher to exit on
+	// Client.Close. nil when the flusher is not running (auto-ack
+	// disabled or "ack" feature not negotiated).
+	ackTickerStop chan struct{}
 }
 
 // Connect performs a session.hello / session.welcome handshake on t
@@ -88,7 +100,48 @@ func Connect(ctx context.Context, t transport.Transport, opts Options) (*Client,
 	}
 	c.wg.Add(1)
 	go c.readLoop()
+	c.startAutoAckTicker()
 	return c, nil
+}
+
+// startAutoAckTicker emits a session.ack at most once per
+// AutoAckInterval whenever the highest observed seq has advanced past
+// the last acked value, so streams that deliver fewer than
+// AutoAckWindow events still drain their ack debt. No-op when auto-ack
+// is disabled or the "ack" feature is not negotiated.
+func (c *Client) startAutoAckTicker() {
+	if c.opts.AutoAckWindow == 0 {
+		return
+	}
+	if !c.HasFeature("ack") {
+		return
+	}
+	interval := c.opts.AutoAckInterval
+	if interval <= 0 {
+		return
+	}
+	stop := make(chan struct{})
+	c.ackTickerStop = stop
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				current := c.highSeq.Load()
+				last := c.lastAck.Load()
+				if current > last && c.lastAck.CompareAndSwap(last, current) {
+					c.sendAck(current)
+				}
+			case <-stop:
+				return
+			case <-c.ctx.Done():
+				return
+			}
+		}
+	}()
 }
 
 // SessionID returns the negotiated session identifier.
@@ -114,6 +167,10 @@ func (c *Client) Close(ctx context.Context) error {
 	env.SessionID = c.sessionID
 	_ = c.transport.Send(ctx, env)
 	c.cancel()
+	if c.ackTickerStop != nil {
+		close(c.ackTickerStop)
+		c.ackTickerStop = nil
+	}
 	err := c.transport.Close()
 	c.wg.Wait()
 	c.mu.Lock()
@@ -265,6 +322,31 @@ func (c *Client) subscribersFor(jobID string) []*Subscription {
 		}
 	}
 	return out
+}
+
+// removeSubscriber drops the subscriber under key, releasing references
+// so future events for the same job no longer route through it. Safe to
+// call multiple times.
+func (c *Client) removeSubscriber(key string) {
+	if key == "" {
+		return
+	}
+	c.mu.Lock()
+	delete(c.subscribers, key)
+	c.mu.Unlock()
+}
+
+// removePending drops h from the pending FIFO; called on every error
+// path of Submit so a stale handle cannot soak up a later acceptance.
+func (c *Client) removePending(h *JobHandle) {
+	c.mu.Lock()
+	for i, ph := range c.pending {
+		if ph == h {
+			c.pending = append(c.pending[:i], c.pending[i+1:]...)
+			break
+		}
+	}
+	c.mu.Unlock()
 }
 
 func (c *Client) handleJobTerminal(env arcp.Envelope) {

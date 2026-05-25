@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	arcp "github.com/agentruntimecontrolprotocol/go-sdk"
 	"github.com/agentruntimecontrolprotocol/go-sdk/messages"
@@ -79,21 +80,35 @@ func (c *Client) Submit(ctx context.Context, req SubmitRequest) (*JobHandle, err
 		default:
 		}
 	}
+	// Serialize the submit handshake so c.pending is always in the
+	// same order as the runtime's acceptance stream. Without this two
+	// concurrent submits could land on the wire in one order, append
+	// to c.pending in another, and cross-resolve.
+	c.submitMu.Lock()
 	c.mu.Lock()
 	c.pending = append(c.pending, h)
 	c.mu.Unlock()
 	if err := c.transport.Send(ctx, env); err != nil {
+		c.removePending(h)
+		c.submitMu.Unlock()
 		return nil, err
 	}
 	select {
 	case acc := <-accepted:
 		h.id = acc.JobID
+		c.submitMu.Unlock()
 		return h, nil
 	case <-h.doneCh:
+		c.removePending(h)
+		c.submitMu.Unlock()
 		return nil, h.Err()
 	case <-ctx.Done():
+		c.removePending(h)
+		c.submitMu.Unlock()
 		return nil, ctx.Err()
 	case <-c.ctx.Done():
+		c.removePending(h)
+		c.submitMu.Unlock()
 		return nil, errors.New("client closed before job.accepted arrived")
 	}
 }
@@ -164,6 +179,11 @@ type chunkAccum struct {
 // CollectChunks reads chunks until the stream terminates and returns
 // the assembled bytes by result_id. Returns an error if encodings are
 // mixed or chunks arrive out of order.
+//
+// CollectChunks also drains the unfiltered Events() channel as a
+// best-effort consumer so the lossless dispatcher does not stall when
+// the caller is only interested in the assembled chunk bytes; the
+// drained non-chunk events are discarded.
 func (h *JobHandle) CollectChunks(ctx context.Context) ([]byte, error) {
 	by := map[string]*chunkAccum{}
 	for {
@@ -183,9 +203,28 @@ func (h *JobHandle) CollectChunks(ctx context.Context) ([]byte, error) {
 			if !ch.More {
 				return assembleChunks(by)
 			}
+		case <-h.eventsCh:
+			// Drain so the dispatcher does not block on a full events
+			// channel while the caller only reads chunks. We can't
+			// peek non-blocking inside this select; the receive is
+			// the drain.
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-h.doneCh:
+			// Drain any remaining buffered chunks (finish() closes
+			// the channel; this loop walks to the close marker so
+			// no chunks are lost when the handle terminates while
+			// chunks were still in the buffer).
+			for ch := range h.chunksCh {
+				a, exists := by[ch.ResultID]
+				if !exists {
+					a = &chunkAccum{encoding: ch.Encoding, chunks: map[uint64]string{}}
+					by[ch.ResultID] = a
+				} else if a.encoding != ch.Encoding {
+					return nil, arcp.ErrInvalidRequest.WithMessage("mixed encodings in result_chunk stream")
+				}
+				a.chunks[ch.ChunkSeq] = ch.Data
+			}
 			return assembleChunks(by)
 		}
 	}
@@ -237,21 +276,91 @@ func (h *JobHandle) accept(acc messages.JobAccepted) {
 	}
 }
 
-// pushEvent forwards ev to consumers; result_chunk events also route
-// to the chunks channel.
+// pushEvent forwards ev to consumers, preserving order and never
+// silently dropping. By default Send blocks while the consumer is
+// slow; the consumer is expected to drain. If
+// Options.EventDeliveryTimeout is set, the handle closes with a
+// structured overflow error if delivery does not complete within
+// the timeout, so the caller observes a terminal state rather than
+// missing chunks. Returns early if the handle has already
+// terminated or the client context fires.
+//
+// result_chunk events also route to the dedicated chunks channel so
+// CollectChunks sees every chunk in sequence.
 func (h *JobHandle) pushEvent(ev messages.JobEvent) {
-	select {
-	case h.eventsCh <- ev:
-	default:
+	if h.isDone() {
+		return
+	}
+	if !h.deliver(h.eventsCh, ev) {
+		return
 	}
 	if ev.Kind == messages.KindResultChunk {
 		var body messages.ResultChunkBody
 		if err := json.Unmarshal(ev.Body, &body); err == nil {
-			select {
-			case h.chunksCh <- body:
-			default:
-			}
+			h.deliverChunk(body)
 		}
+	}
+}
+
+func (h *JobHandle) isDone() bool {
+	select {
+	case <-h.doneCh:
+		return true
+	default:
+		return false
+	}
+}
+
+// deliver enqueues ev on ch, blocking with the configured timeout (or
+// indefinitely when zero). Returns false if the handle was closed
+// during delivery.
+func (h *JobHandle) deliver(ch chan messages.JobEvent, ev messages.JobEvent) bool {
+	timeout := h.client.opts.EventDeliveryTimeout
+	if timeout <= 0 {
+		select {
+		case ch <- ev:
+			return true
+		case <-h.doneCh:
+			return false
+		case <-h.client.ctx.Done():
+			return false
+		}
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case ch <- ev:
+		return true
+	case <-h.doneCh:
+		return false
+	case <-h.client.ctx.Done():
+		return false
+	case <-timer.C:
+		h.fail(arcp.ErrInternalError.WithMessage("job handle overflow: consumer did not drain within EventDeliveryTimeout"))
+		return false
+	}
+}
+
+// deliverChunk is the chunks-channel mirror of deliver, preserving
+// chunk order for CollectChunks.
+func (h *JobHandle) deliverChunk(body messages.ResultChunkBody) {
+	timeout := h.client.opts.EventDeliveryTimeout
+	if timeout <= 0 {
+		select {
+		case h.chunksCh <- body:
+		case <-h.doneCh:
+		case <-h.client.ctx.Done():
+		}
+		return
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case h.chunksCh <- body:
+	case <-h.doneCh:
+	case <-h.client.ctx.Done():
+	case <-timer.C:
+		h.fail(arcp.ErrInternalError.WithMessage("job handle overflow: consumer did not drain within EventDeliveryTimeout"))
 	}
 }
 
