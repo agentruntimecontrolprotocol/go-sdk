@@ -30,6 +30,12 @@ type Subscription struct {
 	ack       *messages.JobSubscribed
 	ackCh     chan messages.JobSubscribed
 	closeOnce sync.Once
+	// pushWG tracks in-flight push() calls so close() can wait for them
+	// to drain before closing s.events. Without this, push() can be
+	// mid-send on s.events while close() concurrently closes it — a
+	// race the race detector flags and that can panic with
+	// "send on closed channel".
+	pushWG sync.WaitGroup
 }
 
 // Subscribe attaches the current session to jobID. The runtime
@@ -195,6 +201,10 @@ func (s *Subscription) acknowledged(payload messages.JobSubscribed) {
 // EventDeliveryTimeout. The default ordering and result_chunk
 // guarantees promised by the README are preserved.
 func (s *Subscription) push(ev messages.JobEvent) {
+	// Register with the close barrier before checking isClosed so a
+	// concurrent close() will Wait() for us to finish the send.
+	s.pushWG.Add(1)
+	defer s.pushWG.Done()
 	if s.isClosed() {
 		return
 	}
@@ -234,13 +244,18 @@ func (s *Subscription) isClosed() bool {
 
 func (s *Subscription) close(err error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.err != nil || isClosed(s.doneCh) {
+		s.mu.Unlock()
 		return
 	}
 	s.err = err
-	close(s.events)
+	// Close doneCh first so any in-flight push() unblocks via its
+	// select case, then wait for those pushes to exit before closing
+	// the events channel.
 	close(s.doneCh)
+	s.mu.Unlock()
+	s.pushWG.Wait()
+	close(s.events)
 }
 
 func isClosed(ch chan struct{}) bool {
