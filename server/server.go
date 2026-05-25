@@ -53,9 +53,10 @@ type Server struct {
 	lifeCtx    context.Context
 	lifeCancel context.CancelFunc
 
-	sessMu       sync.Mutex
-	sessions     map[*session]struct{}
-	sessionsDone chan struct{}
+	sessMu           sync.Mutex
+	sessions         map[*session]struct{}
+	sessionsDone     chan struct{}
+	sessionsDoneOnce sync.Once
 
 	// seqAllocs holds the per-session-id event_seq counter. It is
 	// allocated at handshake and reused on resume so events emitted by
@@ -183,11 +184,7 @@ func (s *Server) unregisterSession(sess *session) {
 	}
 	s.sessMu.Unlock()
 	if last && closed {
-		select {
-		case <-s.sessionsDone:
-		default:
-			close(s.sessionsDone)
-		}
+		s.sessionsDoneOnce.Do(func() { close(s.sessionsDone) })
 	}
 }
 
@@ -402,11 +399,7 @@ func (s *Server) Close() error {
 		sessions = append(sessions, sess)
 	}
 	if len(sessions) == 0 {
-		select {
-		case <-s.sessionsDone:
-		default:
-			close(s.sessionsDone)
-		}
+		s.sessionsDoneOnce.Do(func() { close(s.sessionsDone) })
 	}
 	s.sessMu.Unlock()
 	for _, sess := range sessions {
