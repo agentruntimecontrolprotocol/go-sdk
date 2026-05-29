@@ -1,7 +1,9 @@
 SHELL := /bin/bash
 GOLANGCI_LINT ?= $(shell command -v golangci-lint 2>/dev/null || echo $$(go env GOPATH)/bin/golangci-lint)
+GOMARKDOC ?= $(shell command -v gomarkdoc 2>/dev/null || echo $$(go env GOPATH)/bin/gomarkdoc)
+MODULE := github.com/agentruntimecontrolprotocol/go-sdk
 
-.PHONY: all fmt fmt-check vet lint test cover build doc-check tidy clean install gates conformance diagrams examples-smoke
+.PHONY: all fmt fmt-check vet lint test cover build doc-check docs-api tidy clean install gates conformance diagrams examples-smoke
 
 all: gates
 
@@ -38,6 +40,25 @@ doc-check:
 	if [ -n "$$missing" ]; then \
 		echo "Public symbols missing godoc comments may exist; run 'go doc -all' to inspect."; \
 	fi
+
+# Generate Markdown API docs (one file per package) under docs/api/.
+# Skips internal/, examples/, recipes/, and tests/ packages.
+# Requires gomarkdoc: go install github.com/princjef/gomarkdoc/cmd/gomarkdoc@latest
+docs-api:
+	@command -v "$(GOMARKDOC)" >/dev/null 2>&1 || { \
+		echo "gomarkdoc not found at $(GOMARKDOC)"; \
+		echo "Install: go install github.com/princjef/gomarkdoc/cmd/gomarkdoc@latest"; \
+		exit 1; \
+	}
+	@rm -rf docs/api && mkdir -p docs/api
+	@set -e; \
+	while read -r pkg; do \
+		rel="$${pkg#$(MODULE)}"; rel="$${rel#/}"; \
+		if [ -z "$$rel" ]; then name="arcp"; else name="$$(echo "$$rel" | tr '/' '-')"; fi; \
+		echo "==> $$pkg -> docs/api/$$name.md"; \
+		"$(GOMARKDOC)" --output "docs/api/$$name.md" "$$pkg"; \
+	done < <(go list ./... | grep -vE '/(internal|examples|recipes|tests)(/|$$)')
+	@echo "Generated $$(ls docs/api/*.md | wc -l | tr -d ' ') API doc files in docs/api/."
 
 tidy:
 	go mod tidy

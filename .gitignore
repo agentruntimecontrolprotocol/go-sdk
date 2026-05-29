@@ -4,6 +4,9 @@ coverage.out
 *.out
 arcp
 
+# Generated API docs (produced by `make docs-api`)
+docs/api/
+
 # Editor
 .vscode/*
 !.vscode/settings.json
