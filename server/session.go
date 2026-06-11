@@ -37,6 +37,14 @@ type session struct {
 	sendMu       sync.Mutex
 	outboxClosed bool
 
+	// hbMu guards heartbeatTimer, the outbound session.ping ticker.
+	// Per §6.4 idleness is measured per-direction: the timer is reset
+	// whenever the server actually writes an envelope to the client,
+	// not when it receives one, so a chatty client cannot suppress the
+	// server's own keepalives.
+	hbMu           sync.Mutex
+	heartbeatTimer clock.Timer
+
 	// seq is the per-session-id event_seq allocator. It is shared
 	// across this session struct and any successor created by resume
 	// so events emitted by a job that survives a disconnect cannot
@@ -285,6 +293,14 @@ func (s *session) writeLoop() {
 				}
 				return
 			}
+			// A message just flowed in the server→client direction, so
+			// reset the outbound heartbeat timer (§6.4 per-direction
+			// idleness).
+			s.hbMu.Lock()
+			if s.heartbeatTimer != nil {
+				s.heartbeatTimer.Reset(s.srv.opts.HeartbeatInterval)
+			}
+			s.hbMu.Unlock()
 		case <-s.ctx.Done():
 			return
 		}
@@ -372,6 +388,9 @@ func (s *session) run(ctx context.Context) error {
 	var heartbeatTimer clock.Timer
 	if s.hasFeature("heartbeat") && s.srv.opts.HeartbeatInterval > 0 {
 		heartbeatTimer = s.srv.opts.Clock.AfterFunc(s.srv.opts.HeartbeatInterval, s.sendPing)
+		s.hbMu.Lock()
+		s.heartbeatTimer = heartbeatTimer
+		s.hbMu.Unlock()
 		defer heartbeatTimer.Stop()
 	}
 	// Inbound heartbeat watchdog.
@@ -395,9 +414,10 @@ func (s *session) run(ctx context.Context) error {
 		if watchdog != nil {
 			watchdog.Reset(2 * s.srv.opts.HeartbeatInterval)
 		}
-		if heartbeatTimer != nil {
-			heartbeatTimer.Reset(s.srv.opts.HeartbeatInterval)
-		}
+		// Note: the outbound heartbeat timer is intentionally NOT reset
+		// here. Per §6.4, heartbeat idleness is measured per-direction;
+		// the outbound timer is reset only when the server writes (see
+		// writeLoop), so inbound chatter cannot starve server pings.
 		if err := s.dispatch(s.ctx, env); err != nil {
 			s.srv.opts.Logger.Debug("dispatch failed", "type", env.Type, "err", err)
 		}

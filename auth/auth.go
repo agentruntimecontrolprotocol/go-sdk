@@ -4,6 +4,7 @@ package auth
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 
 	arcp "github.com/agentruntimecontrolprotocol/go-sdk"
@@ -29,12 +30,30 @@ func (f VerifierFunc) Verify(ctx context.Context, token string) (string, error) 
 // arcp.ErrUnauthenticated wrapping ErrInvalidToken, so callers can
 // test either with errors.Is.
 func StaticBearer(tokens map[string]string) Verifier {
-	cp := make(map[string]string, len(tokens))
+	type tokenEntry struct {
+		token     []byte
+		principal string
+	}
+	entries := make([]tokenEntry, 0, len(tokens))
 	for k, v := range tokens {
-		cp[k] = v
+		entries = append(entries, tokenEntry{token: []byte(k), principal: v})
 	}
 	return VerifierFunc(func(ctx context.Context, token string) (string, error) {
-		if principal, ok := cp[token]; ok {
+		// Compare against every configured token with a constant-time
+		// comparison and without an early exit, so we do not leak
+		// timing information about which secret (if any) the candidate
+		// matched. This mirrors the resume_token comparison in the
+		// server package.
+		candidate := []byte(token)
+		principal := ""
+		matched := 0
+		for _, e := range entries {
+			if subtle.ConstantTimeCompare(candidate, e.token) == 1 {
+				principal = e.principal
+				matched = 1
+			}
+		}
+		if matched == 1 {
 			return principal, nil
 		}
 		return "", arcp.ErrUnauthenticated.WithCause(ErrInvalidToken)

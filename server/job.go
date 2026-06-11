@@ -233,7 +233,16 @@ func (j *Job) run() {
 	func() {
 		defer func() {
 			if rec := recover(); rec != nil {
-				err = fmt.Errorf("agent panic: %v\n%s", rec, debug.Stack())
+				// Keep the goroutine dump and server-side file paths
+				// server-local; the wire-facing error is generic so we
+				// do not leak internal runtime details to clients.
+				j.session.srv.opts.Logger.Error("agent panicked",
+					"job_id", j.id,
+					"agent", j.agent,
+					"panic", fmt.Sprintf("%v", rec),
+					"stack", string(debug.Stack()),
+				)
+				err = arcp.ErrInternalError.WithMessage("agent panicked")
 			}
 		}()
 		output, err = j.fn(j.ctx, j.input, jc)

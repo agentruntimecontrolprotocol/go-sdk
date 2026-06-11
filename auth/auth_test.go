@@ -33,6 +33,36 @@ func TestStaticBearerRejectedWrapsErrInvalidToken(t *testing.T) {
 	}
 }
 
+// TestStaticBearerMultipleTokens covers #158: the constant-time
+// comparison must still resolve every configured token to its
+// principal and reject unknown / prefix / empty tokens.
+func TestStaticBearerMultipleTokens(t *testing.T) {
+	v := StaticBearer(map[string]string{
+		"tok-alice": "alice",
+		"tok-bob":   "bob",
+		"tok-carol": "carol",
+	})
+	cases := map[string]string{
+		"tok-alice": "alice",
+		"tok-bob":   "bob",
+		"tok-carol": "carol",
+	}
+	for token, want := range cases {
+		got, err := v.Verify(context.Background(), token)
+		if err != nil {
+			t.Fatalf("Verify(%q) error: %v", token, err)
+		}
+		if got != want {
+			t.Fatalf("Verify(%q) = %q, want %q", token, got, want)
+		}
+	}
+	for _, bad := range []string{"", "tok-", "tok-alic", "tok-alicee", "TOK-ALICE"} {
+		if _, err := v.Verify(context.Background(), bad); !errors.Is(err, ErrInvalidToken) {
+			t.Fatalf("Verify(%q) must reject with ErrInvalidToken, got %v", bad, err)
+		}
+	}
+}
+
 func TestVerifierFunc(t *testing.T) {
 	called := false
 	v := VerifierFunc(func(ctx context.Context, token string) (string, error) {
