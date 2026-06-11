@@ -97,14 +97,10 @@ func (srv *Server) handshake(ctx context.Context, t transport.Transport) (*sessi
 	// session_id and seq counter, rotate the resume_token, and replay
 	// every event with seq > hello.Resume.LastEventSeq.
 	if hello.Resume != nil {
-		entry, rerr := srv.claimResume(*hello.Resume)
+		entry, rerr := srv.claimResume(*hello.Resume, principal)
 		if rerr != nil {
 			_ = sendSessionError(ctx, t, hello.Resume.SessionID, arcp.Code(rerr), rerr.Error())
 			return nil, rerr
-		}
-		if entry.principal != principal {
-			_ = sendSessionError(ctx, t, hello.Resume.SessionID, arcp.CodeUnauthenticated, "resume principal mismatch")
-			return nil, arcp.ErrUnauthenticated.WithMessage("resume principal mismatch")
 		}
 		feats := arcp.IntersectFeatures(srv.features(), hello.Capabilities.Features)
 		newToken := arcp.NewULID()

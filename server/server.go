@@ -209,10 +209,12 @@ func (s *Server) stashResume(sess *session, token string) {
 }
 
 // claimResume validates that a hello.Resume targets a known, unexpired
-// resume entry whose token matches. On success it deletes the entry
-// and returns it; on failure it returns a structured *arcp.Error.
+// resume entry whose token AND authenticated principal match. The entry
+// is only deleted once every check passes, so a failed token or
+// principal check leaves the legitimate owner's resume state intact and
+// claimable. On failure it returns a structured *arcp.Error.
 // Concurrently expired entries are purged opportunistically.
-func (s *Server) claimResume(req messages.ResumeRequest) (*resumeEntry, error) {
+func (s *Server) claimResume(req messages.ResumeRequest, principal string) (*resumeEntry, error) {
 	s.resumeMu.Lock()
 	defer s.resumeMu.Unlock()
 	now := s.opts.Clock.Now()
@@ -232,7 +234,14 @@ func (s *Server) claimResume(req messages.ResumeRequest) (*resumeEntry, error) {
 		return nil, arcp.ErrResumeWindowExpired
 	}
 	if subtle.ConstantTimeCompare([]byte(entry.resumeToken), []byte(req.ResumeToken)) != 1 {
+		// Leave the entry in place: a leaked/incorrect token must not
+		// destroy the rightful owner's resume state.
 		return nil, arcp.ErrUnauthenticated.WithMessage("resume_token mismatch")
+	}
+	if entry.principal != principal {
+		// Same rationale: a principal mismatch must not strand the
+		// legitimate owner's buffered events.
+		return nil, arcp.ErrUnauthenticated.WithMessage("resume principal mismatch")
 	}
 	delete(s.resumes, req.SessionID)
 	return entry, nil

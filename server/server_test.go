@@ -219,7 +219,7 @@ func TestStashAndClaimResumeRoundtrip(t *testing.T) {
 	entry, err := srv.claimResume(messages.ResumeRequest{
 		SessionID:   "sess-1",
 		ResumeToken: "tok-1",
-	})
+	}, "alice")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +232,7 @@ func TestStashAndClaimResumeRoundtrip(t *testing.T) {
 	if _, err := srv.claimResume(messages.ResumeRequest{
 		SessionID:   "sess-1",
 		ResumeToken: "wrong",
-	}); !errors.Is(err, arcp.ErrUnauthenticated) {
+	}, "alice"); !errors.Is(err, arcp.ErrUnauthenticated) {
 		t.Fatalf("want ErrUnauthenticated, got %v", err)
 	}
 
@@ -242,8 +242,39 @@ func TestStashAndClaimResumeRoundtrip(t *testing.T) {
 	if _, err := srv.claimResume(messages.ResumeRequest{
 		SessionID:   "sess-1",
 		ResumeToken: "tok-3",
-	}); !errors.Is(err, arcp.ErrResumeWindowExpired) {
+	}, "alice"); !errors.Is(err, arcp.ErrResumeWindowExpired) {
 		t.Fatalf("want ErrResumeWindowExpired, got %v", err)
+	}
+}
+
+// TestResumePrincipalMismatchPreservesEntry covers #153: a failed
+// principal check must leave the resume entry intact and claimable by
+// the rightful principal.
+func TestResumePrincipalMismatchPreservesEntry(t *testing.T) {
+	srv := New(Options{ResumeWindow: time.Minute})
+	defer srv.Close()
+	alloc := srv.allocFor("sess-pm")
+	alloc.setIfGreater(7)
+	sess := &session{srv: srv, id: "sess-pm", principal: "alice", seq: alloc}
+	srv.stashResume(sess, "tok")
+
+	// Wrong principal: must fail without deleting the entry.
+	if _, err := srv.claimResume(messages.ResumeRequest{
+		SessionID:   "sess-pm",
+		ResumeToken: "tok",
+	}, "mallory"); !errors.Is(err, arcp.ErrUnauthenticated) {
+		t.Fatalf("want ErrUnauthenticated for wrong principal, got %v", err)
+	}
+	// The rightful owner can still resume.
+	entry, err := srv.claimResume(messages.ResumeRequest{
+		SessionID:   "sess-pm",
+		ResumeToken: "tok",
+	}, "alice")
+	if err != nil {
+		t.Fatalf("rightful principal resume failed after mismatch: %v", err)
+	}
+	if entry.seq != 7 {
+		t.Fatalf("entry.seq = %d, want 7", entry.seq)
 	}
 }
 
