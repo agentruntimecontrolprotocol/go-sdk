@@ -693,5 +693,89 @@ func TestIdempotentRetryReplaysAccepted(t *testing.T) {
 	require.Equal(t, int32(1), atomic.LoadInt32(&runs), "agent must run only once for a replayed idempotent submit")
 }
 
+// TestClientCloseIdempotent (#101) calls Close concurrently and again
+// sequentially; it must not panic.
+func TestClientCloseIdempotent(t *testing.T) {
+	srv := server.New(server.Options{})
+	defer srv.Close()
+	a, b := transport.NewMemoryPair()
+	srvCtx, cancelSrv := context.WithCancel(context.Background())
+	defer cancelSrv()
+	go func() { _ = srv.Accept(srvCtx, b) }()
+	cli, err := client.Connect(context.Background(), a, client.Options{
+		Token: "demo", AutoAckWindow: 1, AutoAckInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); _ = cli.Close(context.Background()) }()
+	}
+	wg.Wait()
+	require.NoError(t, cli.Close(context.Background()))
+}
+
+// TestHighestSeqNeverRegresses (#103) feeds out-of-order seqs through a
+// fake runtime and asserts HighestSeq tracks the max.
+func TestHighestSeqNeverRegresses(t *testing.T) {
+	a, b := transport.NewMemoryPair()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go func() {
+		if _, err := b.Recv(ctx); err != nil {
+			return
+		}
+		welcome, _ := arcp.NewEnvelope(messages.TypeSessionWelcome, &messages.SessionWelcome{})
+		welcome.SessionID = "s"
+		_ = b.Send(ctx, welcome)
+		for _, seq := range []uint64{1, 2, 5, 3, 4} {
+			ev, _ := arcp.NewEnvelope(messages.TypeJobEvent, &messages.JobEvent{Kind: messages.KindLog})
+			ev.SessionID = "s"
+			ev.JobID = "j"
+			ev.EventSeq = seq
+			_ = b.Send(ctx, ev)
+		}
+	}()
+	cli, err := client.Connect(ctx, a, client.Options{Token: "demo"})
+	require.NoError(t, err)
+	defer cli.Close(context.Background())
+	require.Eventually(t, func() bool { return cli.HighestSeq() == 5 }, 3*time.Second, 10*time.Millisecond)
+	// Subsequent lower seqs must not regress it.
+	time.Sleep(50 * time.Millisecond)
+	require.Equal(t, uint64(5), cli.HighestSeq())
+}
+
+// TestCollectChunksRespectsCap (#104) caps the assembled size and
+// returns an overflow error for an over-large stream.
+func TestCollectChunksRespectsCap(t *testing.T) {
+	const chunkSize = 1024
+	srv := server.New(server.Options{ChunkSize: chunkSize})
+	defer srv.Close()
+	srv.RegisterAgent("big", func(ctx context.Context, _ json.RawMessage, jc *server.JobContext) (any, error) {
+		w, err := jc.StreamResult("utf8")
+		if err != nil {
+			return nil, err
+		}
+		buf := make([]byte, 64*1024)
+		_, _ = w.Write(buf)
+		return nil, w.Close()
+	})
+	a, b := transport.NewMemoryPair()
+	srvCtx, cancelSrv := context.WithCancel(context.Background())
+	defer cancelSrv()
+	go func() { _ = srv.Accept(srvCtx, b) }()
+	cli, err := client.Connect(context.Background(), a, client.Options{Token: "demo", MaxAssembledBytes: 4096})
+	require.NoError(t, err)
+	defer cli.Close(context.Background())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	h, err := cli.Submit(ctx, client.SubmitRequest{Agent: "big"})
+	require.NoError(t, err)
+	_, err = h.CollectChunks(ctx)
+	require.Error(t, err, "CollectChunks must reject a stream exceeding MaxAssembledBytes")
+}
+
 // helper to keep imports tidy across the audit test file.
 var _ = strings.Contains

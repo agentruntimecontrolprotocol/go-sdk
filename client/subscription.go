@@ -190,7 +190,9 @@ func (s *Subscription) Close(ctx context.Context) error {
 		}
 		env.SessionID = s.client.sessionID
 		env.JobID = s.jobID
-		_ = s.client.transport.Send(ctx, env)
+		// Surface the unsubscribe send failure: a dropped envelope means
+		// the runtime keeps streaming to a dead subscriber.
+		sendErr = s.client.transport.Send(ctx, env)
 		if s.key != "" {
 			s.client.removeSubscriber(s.key)
 		}

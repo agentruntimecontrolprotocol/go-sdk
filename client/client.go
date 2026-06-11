@@ -54,6 +54,10 @@ type Client struct {
 	// Client.Close. nil when the flusher is not running (auto-ack
 	// disabled or "ack" feature not negotiated).
 	ackTickerStop chan struct{}
+
+	// closeOnce makes Close idempotent and panic-safe under concurrent
+	// or repeated calls.
+	closeOnce sync.Once
 }
 
 // Connect performs a session.hello / session.welcome handshake on t
@@ -170,26 +174,38 @@ func (c *Client) HasFeature(name string) bool { return arcp.HasFeature(c.feature
 // a messages.ResumeRequest for a subsequent reconnect.
 func (c *Client) HighestSeq() uint64 { return c.highSeq.Load() }
 
-// Close terminates the session.
+// Close terminates the session. It is idempotent and safe to call
+// concurrently: only the first call runs the shutdown sequence.
 func (c *Client) Close(ctx context.Context) error {
-	env, _ := arcp.NewEnvelope(messages.TypeSessionClose, &messages.SessionClose{Reason: "client close"})
-	env.SessionID = c.sessionID
-	_ = c.transport.Send(ctx, env)
-	c.cancel()
-	if c.ackTickerStop != nil {
-		close(c.ackTickerStop)
-		c.ackTickerStop = nil
-	}
-	err := c.transport.Close()
-	c.wg.Wait()
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, h := range c.handles {
-		h.fail(arcp.ErrInternalError.WithMessage("client closed"))
-	}
-	for _, s := range c.subscribers {
-		s.close(arcp.ErrInternalError.WithMessage("client closed"))
-	}
+	var err error
+	c.closeOnce.Do(func() {
+		env, nerr := arcp.NewEnvelope(messages.TypeSessionClose, &messages.SessionClose{Reason: "client close"})
+		if nerr != nil {
+			c.opts.Logger.Debug("build session.close failed", "session", c.sessionID, "err", nerr)
+		} else {
+			env.SessionID = c.sessionID
+			if serr := c.transport.Send(ctx, env); serr != nil {
+				c.opts.Logger.Debug("session.close send failed", "session", c.sessionID, "err", serr)
+			}
+		}
+		c.cancel()
+		c.mu.Lock()
+		if c.ackTickerStop != nil {
+			close(c.ackTickerStop)
+			c.ackTickerStop = nil
+		}
+		c.mu.Unlock()
+		err = c.transport.Close()
+		c.wg.Wait()
+		c.mu.Lock()
+		for _, h := range c.handles {
+			h.fail(arcp.ErrInternalError.WithMessage("client closed"))
+		}
+		for _, s := range c.subscribers {
+			s.close(arcp.ErrInternalError.WithMessage("client closed"))
+		}
+		c.mu.Unlock()
+	})
 	return err
 }
 
@@ -207,7 +223,17 @@ func (c *Client) readLoop() {
 			return
 		}
 		if env.EventSeq > 0 {
-			c.highSeq.Store(env.EventSeq)
+			// Monotonically track the high-water mark; a replayed or
+			// out-of-order envelope must never regress it (#103).
+			for {
+				cur := c.highSeq.Load()
+				if env.EventSeq <= cur {
+					break
+				}
+				if c.highSeq.CompareAndSwap(cur, env.EventSeq) {
+					break
+				}
+			}
 		}
 		c.dispatch(env)
 	}
@@ -351,7 +377,10 @@ func (c *Client) handleSessionJobs(env arcp.Envelope) {
 		select {
 		case ch <- listResult{jobs: &jobs}:
 		default:
+			c.opts.Logger.Warn("dropping duplicate session.jobs response", "request_id", jobs.RequestID)
 		}
+	} else {
+		c.opts.Logger.Debug("session.jobs with no pending request", "request_id", jobs.RequestID)
 	}
 }
 
@@ -369,6 +398,24 @@ func isSessionFatal(code arcp.ErrorCode) bool {
 func (c *Client) handleJobAccepted(env arcp.Envelope) {
 	var acc messages.JobAccepted
 	if err := env.DecodePayload(&acc); err != nil {
+		return
+	}
+	if acc.JobID == "" {
+		// A malformed runtime must not corrupt the handles map keyed by
+		// "": fail the next pending submit instead (#114).
+		c.mu.Lock()
+		var h *JobHandle
+		if len(c.pending) > 0 {
+			h = c.pending[0]
+			c.pending = c.pending[1:]
+			if h.submitID != "" {
+				delete(c.pendingByID, h.submitID)
+			}
+		}
+		c.mu.Unlock()
+		if h != nil {
+			h.fail(arcp.ErrInvalidRequest.WithMessage("job.accepted carried an empty job_id"))
+		}
 		return
 	}
 	c.mu.Lock()
@@ -396,13 +443,11 @@ func (c *Client) handleJobEvent(env arcp.Envelope) {
 	}
 	c.mu.RLock()
 	h := c.handles[env.JobID]
+	subs := append([]*Subscription(nil), c.subscribersFor(env.JobID)...)
 	c.mu.RUnlock()
 	if h != nil {
 		h.pushEvent(ev)
 	}
-	c.mu.RLock()
-	subs := append([]*Subscription(nil), c.subscribersFor(env.JobID)...)
-	c.mu.RUnlock()
 	for _, s := range subs {
 		s.push(ev)
 	}
@@ -497,7 +542,13 @@ func (c *Client) maybeAck() {
 		return
 	}
 	if c.lastAck.CompareAndSwap(last, current) {
-		go c.sendAck(current)
+		// Track the ack goroutine in wg so Close waits for it and no
+		// Send races past transport.Close (#102).
+		c.wg.Add(1)
+		go func() {
+			defer c.wg.Done()
+			c.sendAck(current)
+		}()
 	}
 }
 

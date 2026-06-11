@@ -5,6 +5,16 @@ import (
 	"testing"
 )
 
+// TestAssembleChunksGap covers #119: a gap in chunk_seq must error.
+func TestAssembleChunksGap(t *testing.T) {
+	by := map[string]*chunkAccum{
+		"r1": {encoding: "utf8", chunks: map[uint64]string{0: "a", 2: "b"}},
+	}
+	if _, err := assembleChunks(by); err == nil {
+		t.Fatal("expected error for gap in chunk_seq (0,2)")
+	}
+}
+
 func TestAssembleChunksUTF8(t *testing.T) {
 	by := map[string]*chunkAccum{
 		"r1": {

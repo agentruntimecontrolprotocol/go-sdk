@@ -50,5 +50,10 @@ type PriorValueRevoker interface {
 var BudgetExhausted = arcp.ErrBudgetExhausted
 
 // ErrNoRevocation signals that a provisioner cannot provide a
-// revocation path acceptable for provisioned_credentials.
+// revocation path acceptable for provisioned_credentials. Return it
+// from Issue (to refuse minting credentials a runtime could not later
+// revoke) or from Revoke (to report that no durable revocation path
+// exists); a runtime observing it should reject the
+// provisioned_credentials feature for the session rather than mint
+// unrevocable credentials.
 var ErrNoRevocation = arcp.Newf(arcp.CodeInternalError, "provisioner lacks durable revocation path")

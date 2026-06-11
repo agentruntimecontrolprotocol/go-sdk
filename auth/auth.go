@@ -27,8 +27,11 @@ func (f VerifierFunc) Verify(ctx context.Context, token string) (string, error) 
 // StaticBearer returns a Verifier that accepts a fixed set of tokens.
 // The map keys are the accepted token strings; the values are the
 // resulting principal identifiers. Unknown tokens produce
-// arcp.ErrUnauthenticated wrapping ErrInvalidToken, so callers can
-// test either with errors.Is.
+// arcp.ErrUnauthenticated wrapping ErrInvalidToken via
+// (*arcp.Error).WithCause, whose Unwrap returns the cause, so both
+// errors.Is(err, arcp.ErrUnauthenticated) and
+// errors.Is(err, ErrInvalidToken) hold (see TestStaticBearer* in
+// auth_test.go).
 func StaticBearer(tokens map[string]string) Verifier {
 	type tokenEntry struct {
 		token     []byte

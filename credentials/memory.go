@@ -34,7 +34,8 @@ func NewMemory(prefix string) *Memory {
 }
 
 // Issue returns one bearer credential scoped to req's budget, model,
-// and expiration constraints.
+// and expiration constraints. ctx is ignored: issuance is synchronous
+// and in-memory and cannot be cancelled.
 func (m *Memory) Issue(_ context.Context, req IssueRequest) ([]messages.Credential, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -23,9 +23,16 @@ type Options struct {
 	Features []string
 	// Logger receives client diagnostics. nil uses slog.Default().
 	Logger *slog.Logger
-	// AutoAck coalesces session.ack emission to one every Window
-	// events processed (zero disables auto-ack).
+	// AutoAckWindow emits a session.ack each time the highest observed
+	// event_seq advances by at least Window since the last ack (zero
+	// disables auto-ack). Note this tracks event_seq advancement, not a
+	// literal count of events processed; the two diverge when the
+	// server skips seq numbers.
 	AutoAckWindow uint64
+	// MaxAssembledBytes caps the total size CollectChunks will assemble
+	// from a result stream, bounding memory against a hostile or
+	// runaway runtime. Zero uses 64 MiB.
+	MaxAssembledBytes int64
 	// AutoAckInterval bounds how long auto-ack waits between sends.
 	AutoAckInterval time.Duration
 	// Resume, if non-nil, asks the runtime to continue a previously
@@ -61,6 +68,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.AutoAckInterval == 0 {
 		o.AutoAckInterval = 250 * time.Millisecond
+	}
+	if o.MaxAssembledBytes == 0 {
+		o.MaxAssembledBytes = 64 << 20
 	}
 	return o
 }
