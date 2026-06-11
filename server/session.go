@@ -574,6 +574,7 @@ func (s *session) handleJobSubmit(ctx context.Context, env arcp.Envelope) error 
 	}
 	job := newJob(s, canonical, req, fn, env.TraceID)
 	if !s.srv.registerJob(job) {
+		job.discard()
 		return s.sendErrorFor(env, arcp.CodeInternalError, "job id collision")
 	}
 	if req.IdempotencyKey != "" {
@@ -585,10 +586,12 @@ func (s *session) handleJobSubmit(ctx context.Context, env arcp.Envelope) error 
 		})
 		if err != nil {
 			s.srv.unregisterJob(job.id)
+			job.discard()
 			return s.sendErrorFor(env, arcp.Code(err), "idempotency store error: "+err.Error())
 		}
 		if !fresh {
 			s.srv.unregisterJob(job.id)
+			job.discard()
 			return s.sendErrorFor(env, arcp.CodeDuplicateKey, "idempotency key already used for job "+entry.JobID)
 		}
 	}
@@ -612,6 +615,7 @@ func (s *session) handleJobSubmit(ctx context.Context, env arcp.Envelope) error 
 		})
 		if err != nil {
 			s.srv.unregisterJob(job.id)
+			job.discard()
 			return s.sendErrorFor(env, arcp.Code(err), "credential issue failed: "+err.Error())
 		}
 		job.attachCredentials(creds)
@@ -619,6 +623,8 @@ func (s *session) handleJobSubmit(ctx context.Context, env arcp.Envelope) error 
 	}
 	aenv, err := arcp.NewEnvelope(messages.TypeJobAccepted, &accept)
 	if err != nil {
+		s.srv.unregisterJob(job.id)
+		job.discard()
 		return err
 	}
 	aenv.JobID = job.id

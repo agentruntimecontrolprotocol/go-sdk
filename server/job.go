@@ -41,7 +41,8 @@ type Job struct {
 	terminal   bool
 	cancelRe   string
 
-	expiryTimer clock.Timer
+	expiryTimer  clock.Timer
+	runtimeTimer clock.Timer
 
 	// streamCount limits at most one StreamResult per job.
 	streamCount int
@@ -88,11 +89,28 @@ func newJob(s *session, canonicalAgent string, req messages.JobSubmit, fn AgentF
 	}
 	if req.MaxRuntimeSec > 0 {
 		d := time.Duration(req.MaxRuntimeSec) * time.Second
-		_ = s.srv.opts.Clock.AfterFunc(d, func() {
+		j.runtimeTimer = s.srv.opts.Clock.AfterFunc(d, func() {
 			j.timeout()
 		})
 	}
 	return j
+}
+
+// discard tears down a job that was created but rejected before it ever
+// started running (duplicate idempotency key, store/provisioner/envelope
+// error, id collision). It marks the job terminal so a late expiry or
+// max-runtime timer fire becomes a no-op (no spurious job.error for a
+// job the client never saw accepted), stops both timers, and releases
+// the job context so rejected submits do not leak lifeCtx children.
+func (j *Job) discard() {
+	j.markTerminal(messages.StatusError)
+	if j.expiryTimer != nil {
+		j.expiryTimer.Stop()
+	}
+	if j.runtimeTimer != nil {
+		j.runtimeTimer.Stop()
+	}
+	j.cancel()
 }
 
 // ID returns the job identifier.
@@ -223,6 +241,11 @@ func (j *Job) emitTerminal(typ string, payload any) {
 func (j *Job) run() {
 	if j.expiryTimer != nil {
 		defer j.expiryTimer.Stop()
+	}
+	// Stop the max-runtime timer on exit so a completed job does not
+	// leave the timer armed until its duration elapses (#80).
+	if j.runtimeTimer != nil {
+		defer j.runtimeTimer.Stop()
 	}
 	j.setStatus(messages.StatusRunning)
 	jc := &JobContext{job: j}
