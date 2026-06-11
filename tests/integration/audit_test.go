@@ -134,5 +134,53 @@ func TestServerHeartbeatNotStarvedByInboundTraffic(t *testing.T) {
 	require.True(t, gotPing, "server must emit session.ping despite constant inbound traffic")
 }
 
+// TestMalformedBudgetRejected (#149) submits a job whose lease_request
+// carries a malformed cost.budget pattern and asserts the server
+// rejects it with INVALID_REQUEST and never accepts the job.
+func TestMalformedBudgetRejected(t *testing.T) {
+	srv := server.New(server.Options{})
+	defer srv.Close()
+	started := make(chan struct{}, 1)
+	srv.RegisterAgent("noop", func(ctx context.Context, _ json.RawMessage, jc *server.JobContext) (any, error) {
+		started <- struct{}{}
+		return nil, nil
+	})
+	a, b := transport.NewMemoryPair()
+	srvCtx, cancelSrv := context.WithCancel(context.Background())
+	defer cancelSrv()
+	go func() { _ = srv.Accept(srvCtx, b) }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	hello, _ := arcp.NewEnvelope(messages.TypeSessionHello, &messages.SessionHello{
+		Client: messages.ClientInfo{Name: "t"},
+		Auth:   messages.AuthInfo{Token: "x"},
+	})
+	require.NoError(t, a.Send(ctx, hello))
+	welcome, err := a.Recv(ctx)
+	require.NoError(t, err)
+
+	submit, _ := arcp.NewEnvelope(messages.TypeJobSubmit, &messages.JobSubmit{
+		Agent:        "noop",
+		LeaseRequest: arcp.Lease{arcp.CapCostBudget: {"USD 5.00"}},
+	})
+	submit.SessionID = welcome.SessionID
+	require.NoError(t, a.Send(ctx, submit))
+
+	resp, err := a.Recv(ctx)
+	require.NoError(t, err)
+	require.Equal(t, messages.TypeSessionError, resp.Type)
+	var serr messages.SessionError
+	require.NoError(t, resp.DecodePayload(&serr))
+	require.Equal(t, arcp.CodeInvalidRequest, serr.Code)
+
+	select {
+	case <-started:
+		t.Fatal("agent must not start for a rejected submit")
+	case <-time.After(150 * time.Millisecond):
+	}
+	srv.Close()
+}
+
 // helper to keep imports tidy across the audit test file.
 var _ = strings.Contains

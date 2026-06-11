@@ -11,6 +11,44 @@ import (
 	"github.com/agentruntimecontrolprotocol/go-sdk/internal/lease"
 )
 
+// TestReportDrivesBudgetExhausted covers #148: an over-budget reported
+// cost (already incurred) must drive the counter to <= 0 so the next
+// validated op fails with BUDGET_EXHAUSTED, instead of being silently
+// clamped and leaving the budget effectively unbounded.
+func TestReportDrivesBudgetExhausted(t *testing.T) {
+	st := lease.NewState(arcp.Lease{
+		arcp.CapNetFetch:   {"https://**"},
+		arcp.CapCostBudget: {"USD:5.00"},
+	}, nil)
+	now := time.Now()
+	if err := st.ValidateOp(now, arcp.CapNetFetch, "https://example.com"); err != nil {
+		t.Fatalf("initial op should pass: %v", err)
+	}
+	// Spend $3 twice = $6 against a $5 budget.
+	if rem, ok := st.Report("USD", 3); !ok || rem != 2 {
+		t.Fatalf("first report rem=%v ok=%v, want 2,true", rem, ok)
+	}
+	if rem, ok := st.Report("USD", 3); !ok || rem != -1 {
+		t.Fatalf("second report rem=%v ok=%v, want -1,true", rem, ok)
+	}
+	// The third validated op must now fail with BUDGET_EXHAUSTED.
+	if err := st.ValidateOp(now, arcp.CapNetFetch, "https://example.com"); !errors.Is(err, arcp.ErrBudgetExhausted) {
+		t.Fatalf("want BUDGET_EXHAUSTED after over-budget report, got %v", err)
+	}
+	if _, err := st.ValidateAndDebit(now, arcp.CapNetFetch, "https://example.com", arcp.BudgetAmount{}); !errors.Is(err, arcp.ErrBudgetExhausted) {
+		t.Fatalf("ValidateAndDebit must also fail BUDGET_EXHAUSTED, got %v", err)
+	}
+}
+
+// TestReportUnbudgetedCurrencyIgnored: reporting against a currency not
+// in the lease is a no-op.
+func TestReportUnbudgetedCurrencyIgnored(t *testing.T) {
+	st := lease.NewState(arcp.Lease{arcp.CapCostBudget: {"USD:5.00"}}, nil)
+	if rem, ok := st.Report("EUR", 99); ok || rem != 0 {
+		t.Fatalf("unbudgeted report rem=%v ok=%v, want 0,false", rem, ok)
+	}
+}
+
 func TestValidateOpPermission(t *testing.T) {
 	st := lease.NewState(arcp.Lease{
 		arcp.CapFSRead: {"/workspace/**"},

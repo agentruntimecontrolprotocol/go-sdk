@@ -168,8 +168,12 @@ func (jc *JobContext) Metric(name string, value float64, unit string, dims map[s
 	})
 	if strings.HasPrefix(name, "cost.") && unit != "" && value >= 0 {
 		cur := arcp.Currency(unit)
-		remaining, err := jc.job.lease.Debit(cur, value)
-		if err == nil && jc.job.lease.HasBudget() {
+		// §9.6: a reported metric is an already-incurred cost, so the
+		// counter is always decremented (even past zero). Once it
+		// reaches <= 0, subsequent ValidateOp/ValidateAndDebit calls
+		// return BUDGET_EXHAUSTED.
+		remaining, budgeted := jc.job.lease.Report(cur, value)
+		if budgeted {
 			jc.maybeEmitRemaining(cur, remaining)
 		}
 	}

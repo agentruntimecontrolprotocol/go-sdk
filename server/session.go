@@ -558,6 +558,14 @@ func (s *session) handleJobSubmit(ctx context.Context, env arcp.Envelope) error 
 			return s.sendError(arcp.CodeInvalidRequest, "lease_constraints.expires_at must be in the future")
 		}
 	}
+	// Validate cost.budget grammar up front (§9.6/§12). A malformed
+	// budget pattern must reject the submission with INVALID_REQUEST
+	// rather than silently running the job with no budget bound.
+	for _, pat := range req.LeaseRequest[arcp.CapCostBudget] {
+		if _, perr := arcp.ParseBudgetAmount(pat); perr != nil {
+			return s.sendError(arcp.CodeInvalidRequest, "lease_request cost.budget: "+perr.Error())
+		}
+	}
 	job := newJob(s, canonical, req, fn, env.TraceID)
 	if !s.srv.registerJob(job) {
 		return s.sendError(arcp.CodeInternalError, "job id collision")

@@ -190,6 +190,30 @@ func (s *State) Debit(cur arcp.Currency, v float64) (float64, error) {
 	return s.counters[cur], nil
 }
 
+// Report applies an already-incurred cost against the named currency
+// counter, per the §9.6 metric-reporting path. Unlike Debit and
+// ValidateAndDebit (which authorize work before it happens and refuse
+// to cross zero), the cost reported here has already been spent, so the
+// counter MUST be decremented even when that drives it to or below
+// zero. Once a counter reaches <= 0, the next lease-validated operation
+// fails with BUDGET_EXHAUSTED.
+//
+// Unbudgeted currencies are ignored. The returned bool reports whether
+// the currency was budgeted; the float is the resulting (possibly
+// non-positive) remaining balance.
+func (s *State) Report(cur arcp.Currency, v float64) (float64, bool) {
+	if v < 0 {
+		return 0, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.initialized[cur]; !ok {
+		return 0, false
+	}
+	s.counters[cur] -= v
+	return s.counters[cur], true
+}
+
 func (s *State) matches(cap arcp.Capability, target string) bool {
 	patterns, ok := s.lease[cap]
 	if !ok {
