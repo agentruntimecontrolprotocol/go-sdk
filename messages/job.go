@@ -105,6 +105,16 @@ type JobCancel struct {
 // ARCPType returns the wire-type string for JobCancel.
 func (*JobCancel) ARCPType() string { return TypeJobCancel }
 
+// JobCancelled is the runtime's acknowledgement of a job.cancel (§7.4),
+// emitted before the terminal job.error{code:CANCELLED}.
+type JobCancelled struct {
+	JobID  string `json:"job_id,omitempty"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// ARCPType returns the wire-type string for JobCancelled.
+func (*JobCancelled) ARCPType() string { return TypeJobCancelled }
+
 // JobSubscribe attaches the current session to an existing job.
 type JobSubscribe struct {
 	JobID        string `json:"job_id"`
@@ -145,6 +155,7 @@ func init() {
 	arcp.RegisterMessageType(&JobResult{})
 	arcp.RegisterMessageType(&JobError{})
 	arcp.RegisterMessageType(&JobCancel{})
+	arcp.RegisterMessageType(&JobCancelled{})
 	arcp.RegisterMessageType(&JobSubscribe{})
 	arcp.RegisterMessageType(&JobSubscribed{})
 	arcp.RegisterMessageType(&JobUnsubscribe{})

@@ -98,13 +98,22 @@ type SessionError struct {
 // ARCPType returns the wire-type string for SessionError.
 func (*SessionError) ARCPType() string { return TypeSessionError }
 
-// SessionBye signals a polite session close.
-type SessionBye struct {
+// SessionClose is the client's polite session-close request (§6.7).
+type SessionClose struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// ARCPType returns the wire-type string for SessionBye.
-func (*SessionBye) ARCPType() string { return TypeSessionBye }
+// ARCPType returns the wire-type string for SessionClose.
+func (*SessionClose) ARCPType() string { return TypeSessionClose }
+
+// SessionClosed is the runtime's acknowledgement of a SessionClose
+// (§6.7), sent before the transport drops.
+type SessionClosed struct {
+	Reason string `json:"reason,omitempty"`
+}
+
+// ARCPType returns the wire-type string for SessionClosed.
+func (*SessionClosed) ARCPType() string { return TypeSessionClosed }
 
 // SessionPing is the heartbeat probe; the receiver must respond with
 // SessionPong carrying PingNonce equal to Nonce.
@@ -178,7 +187,8 @@ func init() {
 	arcp.RegisterMessageType(&SessionHello{})
 	arcp.RegisterMessageType(&SessionWelcome{})
 	arcp.RegisterMessageType(&SessionError{})
-	arcp.RegisterMessageType(&SessionBye{})
+	arcp.RegisterMessageType(&SessionClose{})
+	arcp.RegisterMessageType(&SessionClosed{})
 	arcp.RegisterMessageType(&SessionPing{})
 	arcp.RegisterMessageType(&SessionPong{})
 	arcp.RegisterMessageType(&SessionAck{})

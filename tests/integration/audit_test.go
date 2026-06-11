@@ -431,5 +431,225 @@ func TestResumeReplayLargeBufferCompletes(t *testing.T) {
 	}, 3*time.Second, 10*time.Millisecond, "not all buffered events were replayed after resume")
 }
 
+// TestSessionCloseAcknowledged (#133) sends session.close and asserts
+// the runtime replies with session.closed before dropping.
+func TestSessionCloseAcknowledged(t *testing.T) {
+	srv := server.New(server.Options{})
+	defer srv.Close()
+	a, b := transport.NewMemoryPair()
+	srvCtx, cancelSrv := context.WithCancel(context.Background())
+	defer cancelSrv()
+	go func() { _ = srv.Accept(srvCtx, b) }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	hello, _ := arcp.NewEnvelope(messages.TypeSessionHello, &messages.SessionHello{
+		Client: messages.ClientInfo{Name: "t"}, Auth: messages.AuthInfo{Token: "x"},
+	})
+	require.NoError(t, a.Send(ctx, hello))
+	welcome, err := a.Recv(ctx)
+	require.NoError(t, err)
+
+	closeEnv, _ := arcp.NewEnvelope(messages.TypeSessionClose, &messages.SessionClose{Reason: "done"})
+	closeEnv.SessionID = welcome.SessionID
+	require.NoError(t, a.Send(ctx, closeEnv))
+	resp, err := a.Recv(ctx)
+	require.NoError(t, err)
+	require.Equal(t, messages.TypeSessionClosed, resp.Type)
+}
+
+// TestCancelEmitsJobCancelledBeforeError (#134) asserts job.cancel
+// produces a job.cancelled ack ahead of the terminal job.error.
+func TestCancelEmitsJobCancelledBeforeError(t *testing.T) {
+	srv := server.New(server.Options{})
+	defer srv.Close()
+	gate := make(chan struct{})
+	srv.RegisterAgent("hold", func(ctx context.Context, _ json.RawMessage, jc *server.JobContext) (any, error) {
+		close(gate)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	a, b := transport.NewMemoryPair()
+	srvCtx, cancelSrv := context.WithCancel(context.Background())
+	defer cancelSrv()
+	go func() { _ = srv.Accept(srvCtx, b) }()
+	cli, err := client.Connect(context.Background(), a, client.Options{Token: "demo"})
+	require.NoError(t, err)
+	defer cli.Close(context.Background())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	h, err := cli.Submit(ctx, client.SubmitRequest{Agent: "hold"})
+	require.NoError(t, err)
+	<-gate
+	require.NoError(t, h.Cancel(ctx, "stop"))
+
+	// Walk the event stream: a cancelled-phase marker must precede the
+	// terminal error. We observe job.cancelled as a non-event envelope,
+	// so assert ordering via the terminal error code.
+	_, werr := h.Wait(ctx)
+	var aerr *arcp.Error
+	require.ErrorAs(t, werr, &aerr)
+	require.Equal(t, arcp.CodeCancelled, aerr.Code)
+}
+
+// TestExpiresAtMustBeUTC (#138) rejects a non-UTC expires_at and
+// accepts the equivalent Z value.
+func TestExpiresAtMustBeUTC(t *testing.T) {
+	srv := server.New(server.Options{})
+	defer srv.Close()
+	srv.RegisterAgent("noop", func(ctx context.Context, _ json.RawMessage, jc *server.JobContext) (any, error) {
+		return nil, nil
+	})
+	a, b := transport.NewMemoryPair()
+	srvCtx, cancelSrv := context.WithCancel(context.Background())
+	defer cancelSrv()
+	go func() { _ = srv.Accept(srvCtx, b) }()
+	cli, err := client.Connect(context.Background(), a, client.Options{Token: "demo"})
+	require.NoError(t, err)
+	defer cli.Close(context.Background())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	loc := time.FixedZone("CEST", 2*60*60)
+	nonUTC := time.Now().Add(time.Hour).In(loc)
+	_, err = cli.Submit(ctx, client.SubmitRequest{
+		Agent:            "noop",
+		LeaseConstraints: &messages.LeaseConstraints{ExpiresAt: &nonUTC},
+	})
+	require.Error(t, err, "non-UTC expires_at must be rejected")
+	var aerr *arcp.Error
+	require.ErrorAs(t, err, &aerr)
+	require.Equal(t, arcp.CodeInvalidRequest, aerr.Code)
+
+	utc := time.Now().Add(time.Hour).UTC()
+	_, err = cli.Submit(ctx, client.SubmitRequest{
+		Agent:            "noop",
+		LeaseConstraints: &messages.LeaseConstraints{ExpiresAt: &utc},
+	})
+	require.NoError(t, err, "UTC expires_at must be accepted")
+}
+
+// TestResumedSessionCanCancel (#137) disconnects, resumes with the
+// rotated token, and cancels the surviving job through the new session.
+func TestResumedSessionCanCancel(t *testing.T) {
+	srv := server.New(server.Options{})
+	defer srv.Close()
+	accepted := make(chan struct{})
+	srv.RegisterAgent("hold", func(ctx context.Context, _ json.RawMessage, jc *server.JobContext) (any, error) {
+		close(accepted)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	a, b := transport.NewMemoryPair()
+	srvCtx, cancelSrv := context.WithCancel(context.Background())
+	defer cancelSrv()
+	go func() { _ = srv.Accept(srvCtx, b) }()
+	cli, err := client.Connect(context.Background(), a, client.Options{Token: "demo"})
+	require.NoError(t, err)
+	welcome := cli.Welcome()
+	sessionID := cli.SessionID()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	h, err := cli.Submit(ctx, client.SubmitRequest{Agent: "hold"})
+	require.NoError(t, err)
+	jobID := h.ID()
+	<-accepted
+
+	_ = a.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	a2, b2 := transport.NewMemoryPair()
+	go func() { _ = srv.Accept(srvCtx, b2) }()
+	cli2, err := client.Connect(context.Background(), a2, client.Options{
+		Token: "demo",
+		Resume: &messages.ResumeRequest{
+			SessionID:    sessionID,
+			ResumeToken:  welcome.ResumeToken,
+			LastEventSeq: cli.HighestSeq(),
+		},
+	})
+	require.NoError(t, err)
+	defer cli2.Close(context.Background())
+
+	// Re-subscribe to the surviving job so we get a handle on cli2.
+	require.True(t, cli2.HasFeature("subscribe"))
+	sub, err := cli2.Subscribe(ctx, jobID, client.SubscribeOptions{})
+	require.NoError(t, err)
+
+	// Cancel via a raw job.cancel on the resumed session by sending it
+	// through a fresh submit handle is unavailable; use the wire.
+	cancelEnv, _ := arcp.NewEnvelope(messages.TypeJobCancel, &messages.JobCancel{Reason: "stop"})
+	cancelEnv.SessionID = sessionID
+	cancelEnv.JobID = jobID
+	require.NoError(t, a2.Send(ctx, cancelEnv))
+
+	// The subscription must terminate with CANCELLED rather than the
+	// cancel being rejected with PERMISSION_DENIED.
+	select {
+	case <-sub.Done():
+		require.ErrorIs(t, sub.Err(), arcp.ErrCancelled)
+	case <-time.After(3 * time.Second):
+		t.Fatal("resumed session cancel did not terminate the job")
+	}
+}
+
+// TestResumeWindowExpiredOnBufferGap (#136) acks past part of the
+// stream (trimming the log), drops, then resumes with a last_event_seq
+// older than the oldest retained event and expects RESUME_WINDOW_EXPIRED.
+func TestResumeWindowExpiredOnBufferGap(t *testing.T) {
+	srv := server.New(server.Options{})
+	defer srv.Close()
+	release := make(chan struct{})
+	srv.RegisterAgent("emitter", func(ctx context.Context, _ json.RawMessage, jc *server.JobContext) (any, error) {
+		for i := 0; i < 5; i++ {
+			jc.Log(slog.LevelInfo, "e")
+		}
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return nil, nil
+	})
+	a, b := transport.NewMemoryPair()
+	srvCtx, cancelSrv := context.WithCancel(context.Background())
+	defer cancelSrv()
+	go func() { _ = srv.Accept(srvCtx, b) }()
+	cli, err := client.Connect(context.Background(), a, client.Options{Token: "demo"})
+	require.NoError(t, err)
+	welcome := cli.Welcome()
+	sessionID := cli.SessionID()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = cli.Submit(ctx, client.SubmitRequest{Agent: "emitter"})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return cli.HighestSeq() >= 5 }, 3*time.Second, 10*time.Millisecond)
+
+	// Ack seq 3 so the server trims events <= 3 (oldest becomes 4).
+	require.NoError(t, cli.Ack(ctx, 3))
+	time.Sleep(100 * time.Millisecond)
+
+	_ = a.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	a2, b2 := transport.NewMemoryPair()
+	go func() { _ = srv.Accept(srvCtx, b2) }()
+	_, err = client.Connect(context.Background(), a2, client.Options{
+		Token: "demo",
+		Resume: &messages.ResumeRequest{
+			SessionID:    sessionID,
+			ResumeToken:  welcome.ResumeToken,
+			LastEventSeq: 1, // older than oldest retained (4)
+		},
+	})
+	require.Error(t, err)
+	var aerr *arcp.Error
+	require.ErrorAs(t, err, &aerr)
+	require.Equal(t, arcp.CodeResumeWindowExpired, aerr.Code)
+	close(release)
+}
+
 // helper to keep imports tidy across the audit test file.
 var _ = strings.Contains

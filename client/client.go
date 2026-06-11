@@ -172,7 +172,7 @@ func (c *Client) HighestSeq() uint64 { return c.highSeq.Load() }
 
 // Close terminates the session.
 func (c *Client) Close(ctx context.Context) error {
-	env, _ := arcp.NewEnvelope(messages.TypeSessionBye, &messages.SessionBye{Reason: "client close"})
+	env, _ := arcp.NewEnvelope(messages.TypeSessionClose, &messages.SessionClose{Reason: "client close"})
 	env.SessionID = c.sessionID
 	_ = c.transport.Send(ctx, env)
 	c.cancel()

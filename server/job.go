@@ -200,6 +200,13 @@ func (j *Job) expireLease() {
 	if !j.markTerminal(messages.StatusError) {
 		return
 	}
+	// §14: log lease expirations for audit.
+	var expiresAt any
+	if t := j.lease.ExpiresAt(); t != nil {
+		expiresAt = t.Format(time.RFC3339)
+	}
+	j.session.srv.opts.Logger.Info("lease expired",
+		"job_id", j.id, "principal", j.principal, "agent", j.agent, "expires_at", expiresAt)
 	j.emitTerminalError(arcp.CodeLeaseExpired, "lease expired during execution")
 	j.revokeAll()
 	j.cancel()

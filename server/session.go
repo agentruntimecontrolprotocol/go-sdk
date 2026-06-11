@@ -108,6 +108,16 @@ func (srv *Server) handshake(ctx context.Context, t transport.Transport) (*sessi
 			_ = sendSessionError(ctx, t, hello.Resume.SessionID, arcp.Code(rerr), rerr.Error())
 			return nil, rerr
 		}
+		// §6.3: if the buffer no longer covers the requested
+		// last_event_seq (a gap between it and the oldest retained
+		// event), reject with RESUME_WINDOW_EXPIRED rather than
+		// replaying a silently-truncated stream (#136).
+		if hello.Resume.LastEventSeq > 0 {
+			if oldest, ok := srv.log.Oldest(entry.sessionID); ok && oldest > hello.Resume.LastEventSeq+1 {
+				_ = sendSessionError(ctx, t, entry.sessionID, arcp.CodeResumeWindowExpired, "resume buffer no longer covers last_event_seq")
+				return nil, arcp.ErrResumeWindowExpired.WithMessage("resume buffer no longer covers last_event_seq")
+			}
+		}
 		feats := arcp.IntersectFeatures(srv.features(), hello.Capabilities.Features)
 		newToken := arcp.NewULID()
 		welcome := messages.SessionWelcome{
@@ -502,8 +512,18 @@ func (s *session) dispatch(ctx context.Context, env arcp.Envelope) error {
 		return s.handleAck(env)
 	case messages.TypeSessionListJobs:
 		return s.handleListJobs(ctx, env)
-	case messages.TypeSessionBye:
+	case messages.TypeSessionClose:
+		var body messages.SessionClose
+		_ = env.DecodePayload(&body)
 		s.gracefulBye.Store(true)
+		// Acknowledge with session.closed (§6.7) before tearing down.
+		// Sent synchronously here (the shipped transports guard writes)
+		// so the ack is delivered before cancel stops the writer.
+		closed, err := arcp.NewEnvelope(messages.TypeSessionClosed, &messages.SessionClosed{Reason: body.Reason})
+		if err == nil {
+			closed.SessionID = s.id
+			_ = s.transport.Send(s.ctx, closed)
+		}
 		s.cancel()
 		return nil
 	case messages.TypeJobSubmit:
@@ -617,6 +637,11 @@ func (s *session) handleJobSubmit(ctx context.Context, env arcp.Envelope) error 
 		return s.sendErrorFor(env, arcp.Code(err), err.Error())
 	}
 	if req.LeaseConstraints != nil && req.LeaseConstraints.ExpiresAt != nil {
+		// §9.5: expires_at MUST be UTC (Z / +00:00). Reject any other
+		// zone offset as INVALID_REQUEST.
+		if _, off := req.LeaseConstraints.ExpiresAt.Zone(); off != 0 {
+			return s.sendErrorFor(env, arcp.CodeInvalidRequest, "lease_constraints.expires_at must be UTC (Z suffix)")
+		}
 		if !req.LeaseConstraints.ExpiresAt.After(s.srv.opts.Clock.Now()) {
 			return s.sendErrorFor(env, arcp.CodeInvalidRequest, "lease_constraints.expires_at must be in the future")
 		}
@@ -705,8 +730,20 @@ func (s *session) handleJobCancel(env arcp.Envelope) error {
 	if job == nil {
 		return s.sendErrorFor(env, arcp.CodeJobNotFound, "job "+env.JobID+" not found")
 	}
-	if job.session != s {
+	// Authorize by stable session id + principal rather than the live
+	// *session pointer, so a resumed connection (new session struct,
+	// same id) retains cancel authority (§7.4/§7.7, #137).
+	if job.session.id != s.id || job.principal != s.principal {
 		return s.sendErrorFor(env, arcp.CodePermissionDenied, "only the submitting session can cancel")
+	}
+	// Acknowledge with job.cancelled (§7.4) before the agent's unwind
+	// path emits the terminal job.error{code:CANCELLED}.
+	ack, err := arcp.NewEnvelope(messages.TypeJobCancelled, &messages.JobCancelled{JobID: job.id, Reason: req.Reason})
+	if err == nil {
+		ack.JobID = job.id
+		ack.TraceID = job.traceID
+		ack.EventSeq = s.nextSeq()
+		s.send(ack)
 	}
 	job.cancelWithReason(req.Reason)
 	return nil
@@ -722,11 +759,20 @@ func (s *session) handleJobSubscribe(ctx context.Context, env arcp.Envelope) err
 	}
 	job := s.srv.lookupJob(req.JobID)
 	if job == nil {
+		s.srv.opts.Logger.Warn("job.subscribe denied",
+			"subscriber_principal", s.principal, "job_id", req.JobID,
+			"target_principal", "", "decision", "deny", "reason", "job_not_found")
 		return s.sendErrorFor(env, arcp.CodeJobNotFound, "job "+req.JobID+" not found")
 	}
 	if job.principal != s.principal {
+		s.srv.opts.Logger.Warn("job.subscribe denied",
+			"subscriber_principal", s.principal, "job_id", req.JobID,
+			"target_principal", job.principal, "decision", "deny", "reason", "principal_mismatch")
 		return s.sendErrorFor(env, arcp.CodePermissionDenied, "subscription denied by deployment policy")
 	}
+	s.srv.opts.Logger.Info("job.subscribe granted",
+		"subscriber_principal", s.principal, "job_id", req.JobID,
+		"target_principal", job.principal, "decision", "grant")
 	sub := newSubscription(s, req.JobID)
 	s.srv.addSubscriber(req.JobID, sub)
 	subscribed := messages.JobSubscribed{

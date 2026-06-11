@@ -25,6 +25,9 @@ type Log interface {
 	Since(sessionID string, fromSeq uint64) ([]Entry, error)
 	SinceJob(jobID string, fromSeq uint64) ([]Entry, error)
 	Trim(sessionID string, beforeSeq uint64) error
+	// Oldest returns the smallest retained EventSeq for sessionID and
+	// whether any entry is retained.
+	Oldest(sessionID string) (uint64, bool)
 }
 
 // Memory is a per-session in-memory event log with a fixed retention
@@ -93,6 +96,24 @@ func (m *Memory) SinceJob(jobID string, fromSeq uint64) ([]Entry, error) {
 		}
 	}
 	return out, nil
+}
+
+// Oldest returns the smallest retained EventSeq for sessionID. The
+// second return is false when no entry is retained.
+func (m *Memory) Oldest(sessionID string) (uint64, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	entries := m.bySess[sessionID]
+	if len(entries) == 0 {
+		return 0, false
+	}
+	min := entries[0].EventSeq
+	for _, e := range entries[1:] {
+		if e.EventSeq < min {
+			min = e.EventSeq
+		}
+	}
+	return min, true
 }
 
 // Trim drops entries for sessionID whose EventSeq <= beforeSeq.
