@@ -68,6 +68,12 @@ type session struct {
 	// Used to seed the resumeEntry on non-graceful exit so the client
 	// can present it back on a subsequent hello.Resume.
 	resumeToken string
+
+	// isResume reports whether this session was created by a resume
+	// handshake; if so, run() replays buffered events with
+	// EventSeq > replayFrom after writeLoop is up.
+	isResume   bool
+	replayFrom uint64
 }
 
 func (srv *Server) handshake(ctx context.Context, t transport.Transport) (*session, error) {
@@ -138,21 +144,13 @@ func (srv *Server) handshake(ctx context.Context, t transport.Transport) (*sessi
 			outbox:      make(chan arcp.Envelope, 128),
 			seq:         alloc,
 			resumeToken: newToken,
+			isResume:    true,
+			replayFrom:  hello.Resume.LastEventSeq,
 		}
 		s.backPressureArmed.Store(true)
-		// Replay events the client may have missed. Iterate
-		// chronologically by EventSeq.
-		entries, _ := srv.log.Since(entry.sessionID, hello.Resume.LastEventSeq)
-		sort.Slice(entries, func(i, j int) bool {
-			return entries[i].EventSeq < entries[j].EventSeq
-		})
-		for _, e := range entries {
-			// Re-enqueue under the surviving session id; the seq
-			// already matches what the original transport stamped.
-			env := e.Envelope
-			env.SessionID = entry.sessionID
-			s.send(env)
-		}
+		// The buffered-event replay is deferred to run(): doing it here
+		// (before writeLoop exists to drain the outbox) deadlocks once
+		// more than the outbox capacity is buffered (#146).
 		return s, nil
 	}
 	sessionID := arcp.NewSessionID()
@@ -228,6 +226,21 @@ func (s *session) currentSeq() uint64 {
 func (s *session) send(env arcp.Envelope) {
 	env.SessionID = s.id
 	s.persistOutbound(env)
+	// Resolve the live session for this session id so an event emitted
+	// by a job whose original session was replaced by a resume reaches
+	// the reconnected transport instead of the original closed outbox
+	// (#145). Persistence above is keyed by session id and is unchanged.
+	cur := s.srv.currentSession(s.id)
+	if cur == nil {
+		cur = s
+	}
+	cur.enqueue(env)
+}
+
+// enqueue places env on this session's outbox (best-effort while the
+// outbox is live) and evaluates back-pressure. Delivery is skipped once
+// the outbox is closed; the event is still durable via the log.
+func (s *session) enqueue(env arcp.Envelope) {
 	s.sendMu.Lock()
 	closed := s.outboxClosed
 	if !closed {
@@ -239,6 +252,39 @@ func (s *session) send(env arcp.Envelope) {
 	s.sendMu.Unlock()
 	if !closed {
 		s.maybeEmitBackPressure(env.JobID, env.EventSeq)
+	}
+}
+
+// replayBuffered re-delivers persisted events with EventSeq > fromSeq to
+// this (resumed) session's outbox. It runs from run() after writeLoop is
+// started so the outbox is drained concurrently (avoiding the >128-event
+// deadlock, #146). Replayed envelopes already carry their EventSeq and
+// are already persisted, so they are enqueued directly rather than via
+// send (no double-persist, #76).
+func (s *session) replayBuffered(fromSeq uint64) {
+	entries, err := s.srv.log.Since(s.id, fromSeq)
+	if err != nil {
+		// Surface the error rather than silently serving stale/no data
+		// (#78); the client can re-resume.
+		s.srv.opts.Logger.Debug("resume replay: log.Since failed", "session", s.id, "err", err)
+		return
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].EventSeq < entries[j].EventSeq
+	})
+	for _, e := range entries {
+		env := e.Envelope
+		env.SessionID = s.id
+		s.sendMu.Lock()
+		if !s.outboxClosed {
+			select {
+			case s.outbox <- env:
+			case <-s.ctx.Done():
+				s.sendMu.Unlock()
+				return
+			}
+		}
+		s.sendMu.Unlock()
 	}
 }
 
@@ -370,10 +416,21 @@ func isCredentialRotation(env arcp.Envelope) bool {
 
 // run drives the read loop. Returns when the session ends.
 func (s *session) run(ctx context.Context) error {
+	// Become the live session for this id before starting the writer so
+	// that events from surviving jobs route to this transport (#145).
+	s.srv.setCurrentSession(s)
 	s.wg.Add(1)
 	go s.writeLoop()
 
+	// Replay buffered events now that writeLoop is draining the outbox
+	// (#146); this also delivers anything a surviving job emitted while
+	// the transport was down.
+	if s.isResume {
+		s.replayBuffered(s.replayFrom)
+	}
+
 	defer func() {
+		s.srv.clearCurrentSession(s)
 		s.cancel()
 		s.closeOutbox()
 		s.wg.Wait()

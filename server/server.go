@@ -66,6 +66,14 @@ type Server struct {
 	allocsMu  sync.Mutex
 	seqAllocs map[string]*seqAlloc
 
+	// curMu guards current, the session-id → live-session map. Event
+	// delivery resolves the *current* session for a session id so a
+	// surviving job (or subscription) whose original session struct was
+	// replaced by a resume delivers to the reconnected transport rather
+	// than the original (closed) outbox.
+	curMu   sync.RWMutex
+	current map[string]*session
+
 	closeOnce sync.Once
 	closeCh   chan struct{}
 }
@@ -117,6 +125,34 @@ func (s *Server) dropAlloc(sessionID string) {
 	delete(s.seqAllocs, sessionID)
 }
 
+// setCurrentSession marks sess as the live session for its id, so event
+// delivery routed via any (possibly stale) session struct with the same
+// id reaches sess's transport.
+func (s *Server) setCurrentSession(sess *session) {
+	s.curMu.Lock()
+	s.current[sess.id] = sess
+	s.curMu.Unlock()
+}
+
+// clearCurrentSession removes sess as the live session for its id, but
+// only if it is still the current one (a later resume may have already
+// installed a successor).
+func (s *Server) clearCurrentSession(sess *session) {
+	s.curMu.Lock()
+	if s.current[sess.id] == sess {
+		delete(s.current, sess.id)
+	}
+	s.curMu.Unlock()
+}
+
+// currentSession returns the live session for id, or nil when none is
+// connected (events are then persisted to the log for later replay).
+func (s *Server) currentSession(id string) *session {
+	s.curMu.RLock()
+	defer s.curMu.RUnlock()
+	return s.current[id]
+}
+
 // setIDStore replaces the server's idempotency store. Exported via a
 // test-only constructor below for fault injection.
 func (s *Server) setIDStore(store idstore.Store) {
@@ -157,6 +193,7 @@ func New(opts Options) *Server {
 		sessions:     map[*session]struct{}{},
 		sessionsDone: make(chan struct{}),
 		seqAllocs:    map[string]*seqAlloc{},
+		current:      map[string]*session{},
 		closeCh:      make(chan struct{}),
 	}
 	// Start the background janitor that reclaims expired idempotency

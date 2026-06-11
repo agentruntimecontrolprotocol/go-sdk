@@ -313,5 +313,123 @@ func TestListJobsUnblocksOnTransportFailure(t *testing.T) {
 	}
 }
 
+// TestResumedSessionReceivesLiveEvents (#145) submits a job that keeps
+// emitting after the client reconnects, drops the transport, resumes,
+// and asserts the post-resume events are delivered live on the resumed
+// session (without a second resume).
+func TestResumedSessionReceivesLiveEvents(t *testing.T) {
+	srv := server.New(server.Options{})
+	defer srv.Close()
+	accepted := make(chan struct{})
+	resumed := make(chan struct{})
+	srv.RegisterAgent("survivor", func(ctx context.Context, _ json.RawMessage, jc *server.JobContext) (any, error) {
+		jc.Log(slog.LevelInfo, "first")
+		close(accepted)
+		select {
+		case <-resumed:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		for i := 0; i < 5; i++ {
+			jc.Log(slog.LevelInfo, "post-resume")
+		}
+		return map[string]string{"done": "yes"}, nil
+	})
+
+	a, b := transport.NewMemoryPair()
+	srvCtx, cancelSrv := context.WithCancel(context.Background())
+	defer cancelSrv()
+	go func() { _ = srv.Accept(srvCtx, b) }()
+	cli, err := client.Connect(context.Background(), a, client.Options{Token: "demo"})
+	require.NoError(t, err)
+	welcome := cli.Welcome()
+	sessionID := cli.SessionID()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = cli.Submit(ctx, client.SubmitRequest{Agent: "survivor"})
+	require.NoError(t, err)
+	<-accepted
+
+	// Drop the transport; the job keeps running.
+	_ = a.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	a2, b2 := transport.NewMemoryPair()
+	go func() { _ = srv.Accept(srvCtx, b2) }()
+	cli2, err := client.Connect(context.Background(), a2, client.Options{
+		Token: "demo",
+		Resume: &messages.ResumeRequest{
+			SessionID:    sessionID,
+			ResumeToken:  welcome.ResumeToken,
+			LastEventSeq: cli.HighestSeq(),
+		},
+	})
+	require.NoError(t, err)
+	defer cli2.Close(context.Background())
+	require.Equal(t, sessionID, cli2.SessionID())
+
+	seqBefore := cli2.HighestSeq()
+	// Now let the surviving job emit post-resume events; they must
+	// arrive live on the resumed session.
+	close(resumed)
+	require.Eventually(t, func() bool {
+		return cli2.HighestSeq() > seqBefore
+	}, 3*time.Second, 10*time.Millisecond, "resumed session received no live events from the surviving job")
+}
+
+// TestResumeReplayLargeBufferCompletes (#146) buffers far more events
+// than the outbox capacity (128), drops the transport, and resumes from
+// seq 0. The handshake must complete and every buffered event must be
+// delivered, instead of deadlocking the replay inside the handshake.
+func TestResumeReplayLargeBufferCompletes(t *testing.T) {
+	srv := server.New(server.Options{})
+	defer srv.Close()
+	const n = 200
+	srv.RegisterAgent("noisy", func(ctx context.Context, _ json.RawMessage, jc *server.JobContext) (any, error) {
+		for i := 0; i < n; i++ {
+			jc.Log(slog.LevelInfo, "x")
+		}
+		return nil, nil
+	})
+
+	a, b := transport.NewMemoryPair()
+	srvCtx, cancelSrv := context.WithCancel(context.Background())
+	defer cancelSrv()
+	go func() { _ = srv.Accept(srvCtx, b) }()
+	cli, err := client.Connect(context.Background(), a, client.Options{Token: "demo"})
+	require.NoError(t, err)
+	welcome := cli.Welcome()
+	sessionID := cli.SessionID()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	h, err := cli.Submit(ctx, client.SubmitRequest{Agent: "noisy"})
+	require.NoError(t, err)
+	_, _ = h.Wait(ctx)
+
+	_ = a.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	a2, b2 := transport.NewMemoryPair()
+	go func() { _ = srv.Accept(srvCtx, b2) }()
+	connectCtx, cancelConnect := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancelConnect()
+	cli2, err := client.Connect(connectCtx, a2, client.Options{
+		Token: "demo",
+		Resume: &messages.ResumeRequest{
+			SessionID:    sessionID,
+			ResumeToken:  welcome.ResumeToken,
+			LastEventSeq: 0,
+		},
+	})
+	require.NoError(t, err, "resume handshake must complete even with >128 buffered events")
+	defer cli2.Close(context.Background())
+
+	require.Eventually(t, func() bool {
+		return cli2.HighestSeq() >= n
+	}, 3*time.Second, 10*time.Millisecond, "not all buffered events were replayed after resume")
+}
+
 // helper to keep imports tidy across the audit test file.
 var _ = strings.Contains
