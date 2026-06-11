@@ -22,6 +22,9 @@ type Subscription struct {
 	// key is the registration key in client.subscribers; held so Close
 	// can remove the entry. Empty for not-yet-registered subscriptions.
 	key string
+	// subscribeID is the envelope id of the job.subscribe request, used
+	// to correlate a denial session.error back to this subscription.
+	subscribeID string
 
 	mu        sync.Mutex
 	events    chan messages.JobEvent
@@ -58,12 +61,13 @@ func (c *Client) Subscribe(ctx context.Context, jobID string, opts SubscribeOpti
 	env.JobID = jobID
 	key := jobID + ":" + arcp.NewULID()
 	sub := &Subscription{
-		client: c,
-		jobID:  jobID,
-		key:    key,
-		events: make(chan messages.JobEvent, 128),
-		doneCh: make(chan struct{}),
-		ackCh:  make(chan messages.JobSubscribed, 1),
+		client:      c,
+		jobID:       jobID,
+		key:         key,
+		subscribeID: env.ID,
+		events:      make(chan messages.JobEvent, 128),
+		doneCh:      make(chan struct{}),
+		ackCh:       make(chan messages.JobSubscribed, 1),
 	}
 	c.mu.Lock()
 	c.subscribers[key] = sub
@@ -76,6 +80,15 @@ func (c *Client) Subscribe(ctx context.Context, jobID string, opts SubscribeOpti
 	case ack := <-sub.ackCh:
 		sub.ack = &ack
 		return sub, nil
+	case <-sub.doneCh:
+		// The runtime denied the subscription (PERMISSION_DENIED,
+		// JOB_NOT_FOUND, …): routeError closed the subscription with
+		// the correlated error instead of ever feeding ackCh.
+		c.removeSubscriber(key)
+		if err := sub.Err(); err != nil {
+			return nil, err
+		}
+		return nil, arcp.ErrInternalError.WithMessage("subscription rejected")
 	case <-ctx.Done():
 		c.removeSubscriber(key)
 		return nil, ctx.Err()

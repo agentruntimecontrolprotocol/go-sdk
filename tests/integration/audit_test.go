@@ -182,5 +182,136 @@ func TestMalformedBudgetRejected(t *testing.T) {
 	srv.Close()
 }
 
+// TestPerRequestErrorDoesNotKillOtherJobs (#150) runs two jobs and
+// triggers a per-request session.error (a denied subscribe to a missing
+// job) on the same session, asserting both real jobs keep running
+// rather than being torn down by failAll.
+func TestPerRequestErrorDoesNotKillOtherJobs(t *testing.T) {
+	srv := server.New(server.Options{})
+	defer srv.Close()
+	release := make(chan struct{})
+	srv.RegisterAgent("hold", func(ctx context.Context, _ json.RawMessage, jc *server.JobContext) (any, error) {
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		return map[string]string{"ok": "yes"}, nil
+	})
+	a, b := transport.NewMemoryPair()
+	srvCtx, cancelSrv := context.WithCancel(context.Background())
+	defer cancelSrv()
+	go func() { _ = srv.Accept(srvCtx, b) }()
+	cli, err := client.Connect(context.Background(), a, client.Options{Token: "demo"})
+	require.NoError(t, err)
+	defer cli.Close(context.Background())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	h1, err := cli.Submit(ctx, client.SubmitRequest{Agent: "hold"})
+	require.NoError(t, err)
+	h2, err := cli.Submit(ctx, client.SubmitRequest{Agent: "hold"})
+	require.NoError(t, err)
+
+	// Subscribe to a missing job: the server replies session.error
+	// (JOB_NOT_FOUND). Pre-fix this called failAll and killed h1/h2.
+	_, serr := cli.Subscribe(ctx, "job-does-not-exist", client.SubscribeOptions{})
+	require.Error(t, serr)
+
+	time.Sleep(200 * time.Millisecond)
+	select {
+	case <-h1.Done():
+		t.Fatal("h1 was terminated by an unrelated per-request error")
+	default:
+	}
+	select {
+	case <-h2.Done():
+		t.Fatal("h2 was terminated by an unrelated per-request error")
+	default:
+	}
+	close(release)
+	_, err = h1.Wait(ctx)
+	require.NoError(t, err)
+	_, err = h2.Wait(ctx)
+	require.NoError(t, err)
+}
+
+// TestSubscribeDeniedReturnsPromptly (#151) subscribes to a job that
+// does not exist with a non-cancellable context and asserts Subscribe
+// returns an error promptly instead of hanging forever.
+func TestSubscribeDeniedReturnsPromptly(t *testing.T) {
+	srv := server.New(server.Options{})
+	defer srv.Close()
+	srv.RegisterAgent("noop", func(ctx context.Context, _ json.RawMessage, jc *server.JobContext) (any, error) {
+		return nil, nil
+	})
+	a, b := transport.NewMemoryPair()
+	srvCtx, cancelSrv := context.WithCancel(context.Background())
+	defer cancelSrv()
+	go func() { _ = srv.Accept(srvCtx, b) }()
+	cli, err := client.Connect(context.Background(), a, client.Options{Token: "demo"})
+	require.NoError(t, err)
+	defer cli.Close(context.Background())
+
+	done := make(chan error, 1)
+	go func() {
+		// context.Background() — no deadline; must still return.
+		_, serr := cli.Subscribe(context.Background(), "missing-job", client.SubscribeOptions{})
+		done <- serr
+	}()
+	select {
+	case serr := <-done:
+		require.Error(t, serr)
+	case <-time.After(3 * time.Second):
+		t.Fatal("Subscribe to a missing job hung instead of returning an error")
+	}
+}
+
+// TestListJobsUnblocksOnTransportFailure (#152) keeps a ListJobs call
+// in flight (the peer deliberately never answers it) and then breaks
+// the transport, asserting the call returns an error via failAll rather
+// than hanging until its own (here, background) deadline.
+func TestListJobsUnblocksOnTransportFailure(t *testing.T) {
+	a, b := transport.NewMemoryPair()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	gotList := make(chan struct{})
+	go func() {
+		// Minimal fake runtime: accept hello, send welcome advertising
+		// list_jobs, consume the list request without replying, then
+		// drop the transport.
+		if _, err := b.Recv(ctx); err != nil {
+			return
+		}
+		welcome, _ := arcp.NewEnvelope(messages.TypeSessionWelcome, &messages.SessionWelcome{
+			Capabilities: messages.WelcomeCapabilities{Features: []string{"list_jobs"}},
+		})
+		welcome.SessionID = "sess-1"
+		_ = b.Send(ctx, welcome)
+		if _, err := b.Recv(ctx); err != nil { // the list_jobs request
+			return
+		}
+		close(gotList)
+		_ = b.Close()
+	}()
+
+	cli, err := client.Connect(ctx, a, client.Options{Token: "demo", Features: []string{"list_jobs"}})
+	require.NoError(t, err)
+	require.True(t, cli.HasFeature("list_jobs"))
+
+	done := make(chan error, 1)
+	go func() {
+		_, lerr := cli.ListJobs(context.Background(), client.ListJobsRequest{})
+		done <- lerr
+	}()
+	<-gotList
+	select {
+	case lerr := <-done:
+		require.Error(t, lerr)
+	case <-time.After(3 * time.Second):
+		t.Fatal("ListJobs hung after transport failure")
+	}
+}
+
 // helper to keep imports tidy across the audit test file.
 var _ = strings.Contains

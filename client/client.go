@@ -13,6 +13,13 @@ import (
 	"github.com/agentruntimecontrolprotocol/go-sdk/transport"
 )
 
+// listResult carries either a session.jobs response or a correlated
+// error to a pending ListJobs waiter.
+type listResult struct {
+	jobs *messages.SessionJobs
+	err  error
+}
+
 // Client is the client-side view of one ARCP session. Construct with
 // Connect.
 type Client struct {
@@ -34,8 +41,9 @@ type Client struct {
 	mu          sync.RWMutex
 	handles     map[string]*JobHandle
 	pending     []*JobHandle
+	pendingByID map[string]*JobHandle
 	subscribers map[string]*Subscription
-	listReqs    map[string]chan *messages.SessionJobs
+	listReqs    map[string]chan listResult
 
 	wg sync.WaitGroup
 
@@ -95,8 +103,9 @@ func Connect(ctx context.Context, t transport.Transport, opts Options) (*Client,
 		ctx:         cctx,
 		cancel:      cancel,
 		handles:     map[string]*JobHandle{},
+		pendingByID: map[string]*JobHandle{},
 		subscribers: map[string]*Subscription{},
-		listReqs:    map[string]chan *messages.SessionJobs{},
+		listReqs:    map[string]chan listResult{},
 	}
 	c.wg.Add(1)
 	go c.readLoop()
@@ -214,9 +223,66 @@ func (c *Client) failAll(err error) {
 		h.fail(err)
 	}
 	c.pending = nil
+	c.pendingByID = map[string]*JobHandle{}
 	for _, s := range c.subscribers {
 		s.close(err)
 	}
+	for id, ch := range c.listReqs {
+		select {
+		case ch <- listResult{err: err}:
+		default:
+		}
+		delete(c.listReqs, id)
+	}
+}
+
+// routeError delivers a per-request session.error to the single
+// originating waiter — a pending submit, a pending/active subscription,
+// a ListJobs call, or an already-accepted job handle — correlated by
+// the echoed request id and job id. It returns true when a waiter was
+// found, so the caller can decide whether the error is session-fatal.
+func (c *Client) routeError(requestID, jobID string, e error) bool {
+	c.mu.Lock()
+	if requestID != "" {
+		if h, ok := c.pendingByID[requestID]; ok {
+			delete(c.pendingByID, requestID)
+			for i, ph := range c.pending {
+				if ph == h {
+					c.pending = append(c.pending[:i], c.pending[i+1:]...)
+					break
+				}
+			}
+			c.mu.Unlock()
+			h.fail(e)
+			return true
+		}
+		if ch, ok := c.listReqs[requestID]; ok {
+			delete(c.listReqs, requestID)
+			c.mu.Unlock()
+			select {
+			case ch <- listResult{err: e}:
+			default:
+			}
+			return true
+		}
+		for key, sub := range c.subscribers {
+			if sub.subscribeID == requestID {
+				delete(c.subscribers, key)
+				c.mu.Unlock()
+				sub.close(e)
+				return true
+			}
+		}
+	}
+	if jobID != "" {
+		if h, ok := c.handles[jobID]; ok {
+			c.mu.Unlock()
+			h.fail(e)
+			return true
+		}
+	}
+	c.mu.Unlock()
+	return false
 }
 
 func (c *Client) dispatch(env arcp.Envelope) {
@@ -228,7 +294,21 @@ func (c *Client) dispatch(env arcp.Envelope) {
 	case messages.TypeSessionError:
 		var serr messages.SessionError
 		_ = env.DecodePayload(&serr)
-		c.failAll(&arcp.Error{Code: serr.Code, Message: serr.Message, Retryable: serr.Retryable})
+		e := &arcp.Error{Code: serr.Code, Message: serr.Message, Retryable: serr.Retryable, Details: serr.Details}
+		// Per-request errors (unknown agent, denied subscribe, unknown
+		// cancel, …) are correlated to their originating call and must
+		// not tear down the whole session. Only fail everything for a
+		// genuinely session-fatal error that we cannot correlate.
+		jobID := serr.JobID
+		if jobID == "" {
+			jobID = env.JobID
+		}
+		if c.routeError(serr.RequestID, jobID, e) {
+			break
+		}
+		if isSessionFatal(serr.Code) {
+			c.failAll(e)
+		}
 	case messages.TypeSessionJobs:
 		c.handleSessionJobs(env)
 	case messages.TypeJobAccepted:
@@ -269,9 +349,20 @@ func (c *Client) handleSessionJobs(env arcp.Envelope) {
 	c.mu.Unlock()
 	if ok {
 		select {
-		case ch <- &jobs:
+		case ch <- listResult{jobs: &jobs}:
 		default:
 		}
+	}
+}
+
+// isSessionFatal reports whether a session.error code should terminate
+// the whole session when it cannot be correlated to a specific request.
+func isSessionFatal(code arcp.ErrorCode) bool {
+	switch code {
+	case arcp.CodeUnauthenticated, arcp.CodeHeartbeatLost:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -288,6 +379,9 @@ func (c *Client) handleJobAccepted(env arcp.Envelope) {
 		h = c.pending[0]
 		c.pending = c.pending[1:]
 		c.handles[acc.JobID] = h
+		if h.submitID != "" {
+			delete(c.pendingByID, h.submitID)
+		}
 	}
 	c.mu.Unlock()
 	if h != nil {
@@ -345,6 +439,9 @@ func (c *Client) removePending(h *JobHandle) {
 			c.pending = append(c.pending[:i], c.pending[i+1:]...)
 			break
 		}
+	}
+	if h.submitID != "" {
+		delete(c.pendingByID, h.submitID)
 	}
 	c.mu.Unlock()
 }

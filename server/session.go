@@ -462,17 +462,27 @@ func (s *session) dispatch(ctx context.Context, env arcp.Envelope) error {
 	case messages.TypeJobUnsubscribe:
 		return s.handleJobUnsubscribe(env)
 	default:
-		return s.sendError(arcp.CodeInvalidRequest, "unknown envelope type "+env.Type)
+		return s.sendErrorFor(env, arcp.CodeInvalidRequest, "unknown envelope type "+env.Type)
 	}
 }
 
-func (s *session) sendError(code arcp.ErrorCode, msg string) error {
-	body := messages.SessionError{Code: code, Message: msg, Retryable: code == arcp.CodeInternalError}
-	env, err := arcp.NewEnvelope(messages.TypeSessionError, &body)
+// sendErrorFor emits a per-request session.error that echoes the
+// offending request's envelope id and job_id so the client can fail
+// only the originating call instead of tearing down the whole session.
+func (s *session) sendErrorFor(reqEnv arcp.Envelope, code arcp.ErrorCode, msg string) error {
+	body := messages.SessionError{
+		Code:      code,
+		Message:   msg,
+		Retryable: code == arcp.CodeInternalError,
+		RequestID: reqEnv.ID,
+		JobID:     reqEnv.JobID,
+	}
+	out, err := arcp.NewEnvelope(messages.TypeSessionError, &body)
 	if err != nil {
 		return err
 	}
-	s.send(env)
+	out.JobID = reqEnv.JobID
+	s.send(out)
 	return nil
 }
 
@@ -492,7 +502,7 @@ func (s *session) handlePing(env arcp.Envelope) error {
 
 func (s *session) handleAck(env arcp.Envelope) error {
 	if !s.hasFeature("ack") {
-		return s.sendError(arcp.CodeInvalidRequest, "ack feature not negotiated")
+		return s.sendErrorFor(env, arcp.CodeInvalidRequest, "ack feature not negotiated")
 	}
 	var ack messages.SessionAck
 	if err := env.DecodePayload(&ack); err != nil {
@@ -517,7 +527,7 @@ func (s *session) handleAck(env arcp.Envelope) error {
 
 func (s *session) handleListJobs(ctx context.Context, env arcp.Envelope) error {
 	if !s.hasFeature("list_jobs") {
-		return s.sendError(arcp.CodeInvalidRequest, "list_jobs feature not negotiated")
+		return s.sendErrorFor(env, arcp.CodeInvalidRequest, "list_jobs feature not negotiated")
 	}
 	var req messages.SessionListJobs
 	if err := env.DecodePayload(&req); err != nil {
@@ -525,7 +535,7 @@ func (s *session) handleListJobs(ctx context.Context, env arcp.Envelope) error {
 	}
 	jobs, next, err := s.srv.listJobs(s.principal, req.Filter, req.Limit, req.Cursor)
 	if err != nil {
-		return s.sendError(arcp.CodeInternalError, err.Error())
+		return s.sendErrorFor(env, arcp.CodeInternalError, err.Error())
 	}
 	resp := messages.SessionJobs{
 		RequestID:  env.ID,
@@ -543,19 +553,19 @@ func (s *session) handleListJobs(ctx context.Context, env arcp.Envelope) error {
 func (s *session) handleJobSubmit(ctx context.Context, env arcp.Envelope) error {
 	var req messages.JobSubmit
 	if err := env.DecodePayload(&req); err != nil {
-		return s.sendError(arcp.CodeInvalidRequest, err.Error())
+		return s.sendErrorFor(env, arcp.CodeInvalidRequest, err.Error())
 	}
 	ref, err := messages.ParseAgentRef(req.Agent)
 	if err != nil {
-		return s.sendError(arcp.CodeInvalidRequest, err.Error())
+		return s.sendErrorFor(env, arcp.CodeInvalidRequest, err.Error())
 	}
 	fn, canonical, err := s.srv.resolveAgent(ref)
 	if err != nil {
-		return s.sendError(arcp.Code(err), err.Error())
+		return s.sendErrorFor(env, arcp.Code(err), err.Error())
 	}
 	if req.LeaseConstraints != nil && req.LeaseConstraints.ExpiresAt != nil {
 		if !req.LeaseConstraints.ExpiresAt.After(s.srv.opts.Clock.Now()) {
-			return s.sendError(arcp.CodeInvalidRequest, "lease_constraints.expires_at must be in the future")
+			return s.sendErrorFor(env, arcp.CodeInvalidRequest, "lease_constraints.expires_at must be in the future")
 		}
 	}
 	// Validate cost.budget grammar up front (§9.6/§12). A malformed
@@ -563,12 +573,12 @@ func (s *session) handleJobSubmit(ctx context.Context, env arcp.Envelope) error 
 	// rather than silently running the job with no budget bound.
 	for _, pat := range req.LeaseRequest[arcp.CapCostBudget] {
 		if _, perr := arcp.ParseBudgetAmount(pat); perr != nil {
-			return s.sendError(arcp.CodeInvalidRequest, "lease_request cost.budget: "+perr.Error())
+			return s.sendErrorFor(env, arcp.CodeInvalidRequest, "lease_request cost.budget: "+perr.Error())
 		}
 	}
 	job := newJob(s, canonical, req, fn, env.TraceID)
 	if !s.srv.registerJob(job) {
-		return s.sendError(arcp.CodeInternalError, "job id collision")
+		return s.sendErrorFor(env, arcp.CodeInternalError, "job id collision")
 	}
 	if req.IdempotencyKey != "" {
 		entry, fresh, err := s.srv.idStore.PutIfAbsent(ctx, idstore.Entry{
@@ -579,11 +589,11 @@ func (s *session) handleJobSubmit(ctx context.Context, env arcp.Envelope) error 
 		})
 		if err != nil {
 			s.srv.unregisterJob(job.id)
-			return s.sendError(arcp.Code(err), "idempotency store error: "+err.Error())
+			return s.sendErrorFor(env, arcp.Code(err), "idempotency store error: "+err.Error())
 		}
 		if !fresh {
 			s.srv.unregisterJob(job.id)
-			return s.sendError(arcp.CodeDuplicateKey, "idempotency key already used for job "+entry.JobID)
+			return s.sendErrorFor(env, arcp.CodeDuplicateKey, "idempotency key already used for job "+entry.JobID)
 		}
 	}
 	accept := messages.JobAccepted{
@@ -606,7 +616,7 @@ func (s *session) handleJobSubmit(ctx context.Context, env arcp.Envelope) error 
 		})
 		if err != nil {
 			s.srv.unregisterJob(job.id)
-			return s.sendError(arcp.Code(err), "credential issue failed: "+err.Error())
+			return s.sendErrorFor(env, arcp.Code(err), "credential issue failed: "+err.Error())
 		}
 		job.attachCredentials(creds)
 		accept.Credentials = creds
@@ -634,10 +644,10 @@ func (s *session) handleJobCancel(env arcp.Envelope) error {
 	_ = env.DecodePayload(&req)
 	job := s.srv.lookupJob(env.JobID)
 	if job == nil {
-		return s.sendError(arcp.CodeJobNotFound, "job "+env.JobID+" not found")
+		return s.sendErrorFor(env, arcp.CodeJobNotFound, "job "+env.JobID+" not found")
 	}
 	if job.session != s {
-		return s.sendError(arcp.CodePermissionDenied, "only the submitting session can cancel")
+		return s.sendErrorFor(env, arcp.CodePermissionDenied, "only the submitting session can cancel")
 	}
 	job.cancelWithReason(req.Reason)
 	return nil
@@ -645,7 +655,7 @@ func (s *session) handleJobCancel(env arcp.Envelope) error {
 
 func (s *session) handleJobSubscribe(ctx context.Context, env arcp.Envelope) error {
 	if !s.hasFeature("subscribe") {
-		return s.sendError(arcp.CodeInvalidRequest, "subscribe feature not negotiated")
+		return s.sendErrorFor(env, arcp.CodeInvalidRequest, "subscribe feature not negotiated")
 	}
 	var req messages.JobSubscribe
 	if err := env.DecodePayload(&req); err != nil {
@@ -653,10 +663,10 @@ func (s *session) handleJobSubscribe(ctx context.Context, env arcp.Envelope) err
 	}
 	job := s.srv.lookupJob(req.JobID)
 	if job == nil {
-		return s.sendError(arcp.CodeJobNotFound, "job "+req.JobID+" not found")
+		return s.sendErrorFor(env, arcp.CodeJobNotFound, "job "+req.JobID+" not found")
 	}
 	if job.principal != s.principal {
-		return s.sendError(arcp.CodePermissionDenied, "subscription denied by deployment policy")
+		return s.sendErrorFor(env, arcp.CodePermissionDenied, "subscription denied by deployment policy")
 	}
 	sub := newSubscription(s, req.JobID)
 	s.srv.addSubscriber(req.JobID, sub)

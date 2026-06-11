@@ -79,12 +79,20 @@ type SessionWelcome struct {
 // ARCPType returns the wire-type string for SessionWelcome.
 func (*SessionWelcome) ARCPType() string { return TypeSessionWelcome }
 
-// SessionError is a top-level session-scoped failure.
+// SessionError is a session-scoped failure. Most uses are actually
+// per-request rejections (an unknown agent on job.submit, a denied
+// job.subscribe, an unknown job.cancel, …) that do not end the session.
+// RequestID echoes the id of the offending request envelope and JobID
+// echoes its job_id (when applicable) so clients can correlate the
+// failure to the originating call instead of treating every error as
+// session-fatal.
 type SessionError struct {
 	Code      arcp.ErrorCode `json:"code"`
 	Message   string         `json:"message,omitempty"`
 	Retryable bool           `json:"retryable"`
 	Details   map[string]any `json:"details,omitempty"`
+	RequestID string         `json:"request_id,omitempty"`
+	JobID     string         `json:"job_id,omitempty"`
 }
 
 // ARCPType returns the wire-type string for SessionError.

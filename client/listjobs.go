@@ -35,7 +35,7 @@ func (c *Client) ListJobs(ctx context.Context, req ListJobsRequest) (*JobList, e
 		return nil, err
 	}
 	env.SessionID = c.sessionID
-	ch := make(chan *messages.SessionJobs, 1)
+	ch := make(chan listResult, 1)
 	c.mu.Lock()
 	c.listReqs[env.ID] = ch
 	c.mu.Unlock()
@@ -48,8 +48,11 @@ func (c *Client) ListJobs(ctx context.Context, req ListJobsRequest) (*JobList, e
 		return nil, err
 	}
 	select {
-	case resp := <-ch:
-		return &JobList{Jobs: resp.Jobs, NextCursor: resp.NextCursor}, nil
+	case res := <-ch:
+		if res.err != nil {
+			return nil, res.err
+		}
+		return &JobList{Jobs: res.jobs.Jobs, NextCursor: res.jobs.NextCursor}, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-c.ctx.Done():

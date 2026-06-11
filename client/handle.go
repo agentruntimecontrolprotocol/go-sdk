@@ -27,9 +27,10 @@ type SubmitRequest struct {
 
 // JobHandle is the client-side view of one submitted job.
 type JobHandle struct {
-	client *Client
-	id     string
-	agent  string
+	client   *Client
+	id       string
+	agent    string
+	submitID string
 
 	mu             sync.Mutex
 	accepted       *messages.JobAccepted
@@ -69,6 +70,7 @@ func (c *Client) Submit(ctx context.Context, req SubmitRequest) (*JobHandle, err
 	h := &JobHandle{
 		client:   c,
 		agent:    req.Agent,
+		submitID: env.ID,
 		doneCh:   make(chan struct{}),
 		eventsCh: make(chan messages.JobEvent, 64),
 		chunksCh: make(chan messages.ResultChunkBody, 64),
@@ -87,6 +89,7 @@ func (c *Client) Submit(ctx context.Context, req SubmitRequest) (*JobHandle, err
 	c.submitMu.Lock()
 	c.mu.Lock()
 	c.pending = append(c.pending, h)
+	c.pendingByID[env.ID] = h
 	c.mu.Unlock()
 	if err := c.transport.Send(ctx, env); err != nil {
 		c.removePending(h)
