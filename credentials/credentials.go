@@ -29,6 +29,22 @@ type Provisioner interface {
 	Revoke(ctx context.Context, credentialID string) error
 }
 
+// PriorValueRevoker is an optional Provisioner extension for §9.8.2
+// credential rotation. On rotation the runtime installs a new value for
+// an existing credential id and the PRIOR value MUST be revoked
+// promptly while the credential id stays live with the new value.
+//
+// A Provisioner that implements this interface is asked to revoke only
+// the prior value (RevokePriorValue); the credential id remains
+// outstanding and is revoked wholesale via Revoke at terminal cleanup.
+// A Provisioner that does NOT implement it is assumed to own prior-value
+// revocation itself (e.g. the upstream mints and rotates the value), and
+// the runtime will not call Revoke at rotation time — doing so would
+// kill the freshly rotated-in credential.
+type PriorValueRevoker interface {
+	RevokePriorValue(ctx context.Context, credentialID, priorValue string) error
+}
+
 // BudgetExhausted maps upstream per-credential budget exhaustion to
 // the ARCP boundary error.
 var BudgetExhausted = arcp.ErrBudgetExhausted

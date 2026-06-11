@@ -10,6 +10,7 @@ import (
 	"time"
 
 	arcp "github.com/agentruntimecontrolprotocol/go-sdk"
+	"github.com/agentruntimecontrolprotocol/go-sdk/credentials"
 	"github.com/agentruntimecontrolprotocol/go-sdk/internal/clock"
 	"github.com/agentruntimecontrolprotocol/go-sdk/internal/lease"
 	"github.com/agentruntimecontrolprotocol/go-sdk/messages"
@@ -173,16 +174,19 @@ func (j *Job) outstandingCredentials() []messages.Credential {
 	return append([]messages.Credential(nil), j.creds...)
 }
 
-func (j *Job) replaceCredentialValue(id, newValue string) bool {
+// replaceCredentialValue swaps the stored value for credential id and
+// returns the prior value plus whether the credential was found.
+func (j *Job) replaceCredentialValue(id, newValue string) (string, bool) {
 	j.credsMu.Lock()
 	defer j.credsMu.Unlock()
 	for i := range j.creds {
 		if j.creds[i].ID == id {
+			prior := j.creds[i].Value
 			j.creds[i].Value = newValue
-			return true
+			return prior, true
 		}
 	}
-	return false
+	return "", false
 }
 
 func (j *Job) cancelWithReason(reason string) {
@@ -356,24 +360,47 @@ func (j *Job) revokeAll() {
 }
 
 func (j *Job) revokeCredential(id string) {
+	j.retryRevoke(id, func(ctx context.Context) error {
+		return j.session.srv.opts.Provisioner.Revoke(ctx, id)
+	})
+}
+
+// revokePriorCredentialValue revokes only the prior value of a rotated
+// credential (§9.8.2), keeping the credential id live with its new
+// value. If the provisioner does not implement PriorValueRevoker it is
+// assumed to own prior-value revocation itself, and nothing is revoked
+// here (calling the id-keyed Revoke would kill the rotated-in value).
+func (j *Job) revokePriorCredentialValue(id, priorValue string) {
+	pv, ok := j.session.srv.opts.Provisioner.(credentials.PriorValueRevoker)
+	if !ok {
+		return
+	}
+	j.retryRevoke(id, func(ctx context.Context) error {
+		return pv.RevokePriorValue(ctx, id, priorValue)
+	})
+}
+
+// retryRevoke runs fn with bounded retries, using the runtime Clock for
+// backoff so tests with a mock clock are deterministic (#91).
+func (j *Job) retryRevoke(id string, fn func(ctx context.Context) error) {
 	backoff := []time.Duration{50 * time.Millisecond, 250 * time.Millisecond, time.Second}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var err error
 	for attempt := 0; attempt < len(backoff)+1; attempt++ {
-		err = j.session.srv.opts.Provisioner.Revoke(ctx, id)
+		err = fn(ctx)
 		if err == nil {
 			return
 		}
 		if attempt == len(backoff) {
 			break
 		}
-		timer := time.NewTimer(backoff[attempt])
+		done := make(chan struct{})
+		timer := j.session.srv.opts.Clock.AfterFunc(backoff[attempt], func() { close(done) })
 		select {
-		case <-timer.C:
+		case <-done:
 		case <-ctx.Done():
 			timer.Stop()
-			break
 		}
 	}
 	j.session.srv.opts.Logger.Error("credential revocation failed", "job_id", j.id, "credential_id", id, "err", err)

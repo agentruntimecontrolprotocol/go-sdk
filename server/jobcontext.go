@@ -124,7 +124,8 @@ func (jc *JobContext) RotateCredential(id, newValue string) error {
 	if jc.job.session.srv.opts.Provisioner == nil {
 		return arcp.ErrInvalidRequest.WithMessage("credential provisioner is not configured")
 	}
-	if !jc.job.replaceCredentialValue(id, newValue) {
+	prior, ok := jc.job.replaceCredentialValue(id, newValue)
+	if !ok {
 		return arcp.ErrInvalidRequest.WithMessage("credential " + id + " is not attached to job")
 	}
 	body := messages.StatusBody{
@@ -152,7 +153,9 @@ func (jc *JobContext) RotateCredential(id, newValue string) error {
 	env.TraceID = jc.job.traceID
 	env.EventSeq = jc.job.session.nextSeq()
 	jc.job.session.send(env)
-	jc.job.revokeCredential(id)
+	// §9.8.2: revoke only the PRIOR value; the credential id stays live
+	// with newValue and is revoked once at terminal cleanup.
+	jc.job.revokePriorCredentialValue(id, prior)
 	return nil
 }
 

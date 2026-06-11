@@ -15,12 +15,13 @@ import (
 // Memory is a deterministic in-memory Provisioner for tests, examples,
 // and local development.
 type Memory struct {
-	mu          sync.Mutex
-	prefix      string
-	next        int
-	outstanding map[string]messages.Credential
-	issued      []IssueRequest
-	revoked     []string
+	mu            sync.Mutex
+	prefix        string
+	next          int
+	outstanding   map[string]messages.Credential
+	issued        []IssueRequest
+	revoked       []string
+	revokedValues []string
 }
 
 // NewMemory returns an in-memory provisioner whose credential IDs are
@@ -63,6 +64,25 @@ func (m *Memory) Revoke(_ context.Context, credentialID string) error {
 	delete(m.outstanding, credentialID)
 	m.revoked = append(m.revoked, credentialID)
 	return nil
+}
+
+// RevokePriorValue revokes only the prior value of a rotated credential
+// (§9.8.2): the credential id stays outstanding with its new value and
+// is only fully revoked at terminal cleanup. The prior value is
+// recorded for inspection.
+func (m *Memory) RevokePriorValue(_ context.Context, credentialID, priorValue string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.revokedValues = append(m.revokedValues, priorValue)
+	return nil
+}
+
+// RevokedValues returns the prior credential values passed to
+// RevokePriorValue in call order.
+func (m *Memory) RevokedValues() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.revokedValues...)
 }
 
 // Outstanding returns the number of credentials not yet revoked.

@@ -223,3 +223,38 @@ func TestCredentialRotated(t *testing.T) {
 	require.Equal(t, "rotated-secret", rotated.Details["value"])
 	require.Contains(t, mem.Revoked(), "rot-1")
 }
+
+// TestCredentialRotationKeepsCredentialLive (#157) asserts that
+// RotateCredential keeps the credential id outstanding (with the new
+// value) while the job runs, revokes only the prior value, and revokes
+// the credential id exactly once at terminal cleanup.
+func TestCredentialRotationKeepsCredentialLive(t *testing.T) {
+	mem := credentials.NewMemory("live-")
+	rotated := make(chan struct{})
+	release := make(chan struct{})
+	_, cli, cleanup := credentialPair(t, mem, func(ctx context.Context, input json.RawMessage, jc *server.JobContext) (any, error) {
+		if err := jc.RotateCredential("live-1", "fresh-secret"); err != nil {
+			return nil, err
+		}
+		close(rotated)
+		<-release
+		return map[string]bool{"ok": true}, nil
+	})
+	defer cleanup()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	h, err := cli.Submit(ctx, client.SubmitRequest{Agent: "echo"})
+	require.NoError(t, err)
+	<-rotated
+	// Mid-job: the credential id is still live with the new value.
+	require.Equal(t, 1, mem.Outstanding(), "rotated credential must remain live mid-job")
+	require.Equal(t, []string{"memory-secret-live-1"}, mem.RevokedValues(), "prior value must be revoked")
+
+	close(release)
+	_, err = h.Wait(ctx)
+	require.NoError(t, err)
+	// Terminal cleanup revokes the credential id exactly once.
+	require.Equal(t, 0, mem.Outstanding())
+	require.Equal(t, []string{"live-1"}, mem.Revoked())
+}
