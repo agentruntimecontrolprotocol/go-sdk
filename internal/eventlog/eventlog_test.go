@@ -38,6 +38,24 @@ func TestAppendSinceAndTrim(t *testing.T) {
 	}
 }
 
+// TestTrimAllRemovesMapKey covers #155(3): trimming every entry must
+// not leave an empty slice keyed by the session id.
+func TestTrimAllRemovesMapKey(t *testing.T) {
+	m := NewMemory(0)
+	for i := uint64(1); i <= 3; i++ {
+		_ = m.Append(entry(i, "gone", "j"))
+	}
+	if err := m.Trim("gone", ^uint64(0)); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	_, ok := m.bySess["gone"]
+	m.mu.Unlock()
+	if ok {
+		t.Fatal("fully-trimmed session still leaks a map key")
+	}
+}
+
 func TestSinceJob(t *testing.T) {
 	m := NewMemory(0)
 	_ = m.Append(entry(1, "s1", "ja"))

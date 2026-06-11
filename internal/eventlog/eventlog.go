@@ -106,6 +106,11 @@ func (m *Memory) Trim(sessionID string, beforeSeq uint64) error {
 			kept = append(kept, e)
 		}
 	}
-	m.bySess[sessionID] = kept
+	if len(kept) == 0 {
+		// Don't leak an empty slice keyed by a fully-trimmed session.
+		delete(m.bySess, sessionID)
+	} else {
+		m.bySess[sessionID] = kept
+	}
 	return nil
 }

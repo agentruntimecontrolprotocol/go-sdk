@@ -39,6 +39,7 @@ type Server struct {
 	jobs    map[string]*Job
 	subs    map[string][]*subscription
 	idStore idstore.Store
+	idTTL   time.Duration
 	log     *eventlog.Memory
 
 	resumeMu sync.Mutex
@@ -141,12 +142,14 @@ type resumeEntry struct {
 func New(opts Options) *Server {
 	o := opts.withDefaults()
 	lifeCtx, lifeCancel := context.WithCancel(context.Background())
-	return &Server{
+	const idTTL = 24 * time.Hour
+	s := &Server{
 		opts:         o,
 		agents:       map[string]*agentEntry{},
 		jobs:         map[string]*Job{},
 		subs:         map[string][]*subscription{},
-		idStore:      idstore.NewMemory(24 * time.Hour),
+		idStore:      idstore.NewMemory(idTTL),
+		idTTL:        idTTL,
 		log:          eventlog.NewMemory(10_000),
 		resumes:      map[string]*resumeEntry{},
 		lifeCtx:      lifeCtx,
@@ -155,6 +158,69 @@ func New(opts Options) *Server {
 		sessionsDone: make(chan struct{}),
 		seqAllocs:    map[string]*seqAlloc{},
 		closeCh:      make(chan struct{}),
+	}
+	// Start the background janitor that reclaims expired idempotency
+	// keys, expired resume entries, and their event logs without
+	// requiring any submit/resume traffic. It reschedules itself via
+	// the (test-injectable) Clock and stops rescheduling on Close.
+	s.scheduleJanitor()
+	return s
+}
+
+// scheduleJanitor arms the next janitor tick on the configured Clock.
+func (s *Server) scheduleJanitor() {
+	s.opts.Clock.AfterFunc(s.janitorInterval(), s.janitorTick)
+}
+
+// janitorInterval chooses how often the janitor runs: frequent enough
+// to reclaim resume entries soon after they expire, but bounded so the
+// idempotency TTL is swept several times over its window.
+func (s *Server) janitorInterval() time.Duration {
+	iv := s.idTTL / 24
+	if s.opts.ResumeWindow > 0 && s.opts.ResumeWindow < iv {
+		iv = s.opts.ResumeWindow
+	}
+	if iv <= 0 {
+		iv = time.Minute
+	}
+	return iv
+}
+
+// janitorTick performs one reclamation pass and reschedules itself
+// unless the server is closing.
+func (s *Server) janitorTick() {
+	select {
+	case <-s.closeCh:
+		return
+	default:
+	}
+	s.sweepIdle()
+	s.purgeExpiredResumes()
+	s.scheduleJanitor()
+}
+
+// sweepIdle removes idempotency entries older than the configured TTL.
+func (s *Server) sweepIdle() {
+	cutoff := s.opts.Clock.Now().Add(-s.idTTL)
+	_, _ = s.idStore.Sweep(s.lifeCtx, cutoff)
+}
+
+// purgeExpiredResumes drops resume entries past their window and trims
+// their event logs and seq allocators, independent of resume traffic.
+func (s *Server) purgeExpiredResumes() {
+	now := s.opts.Clock.Now()
+	var expired []string
+	s.resumeMu.Lock()
+	for id, e := range s.resumes {
+		if now.After(e.expiresAt) {
+			delete(s.resumes, id)
+			expired = append(expired, id)
+		}
+	}
+	s.resumeMu.Unlock()
+	for _, id := range expired {
+		_ = s.log.Trim(id, ^uint64(0))
+		s.dropAlloc(id)
 	}
 }
 
@@ -255,6 +321,9 @@ func (s *Server) dropResume(sessionID string) {
 	s.resumeMu.Lock()
 	delete(s.resumes, sessionID)
 	s.resumeMu.Unlock()
+	// Reclaim the gracefully-closed session's buffered event log too;
+	// no future resume can reattach to a gracefully-closed session id.
+	_ = s.log.Trim(sessionID, ^uint64(0))
 	s.dropAlloc(sessionID)
 }
 
