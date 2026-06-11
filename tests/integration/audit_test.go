@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -649,6 +650,47 @@ func TestResumeWindowExpiredOnBufferGap(t *testing.T) {
 	require.ErrorAs(t, err, &aerr)
 	require.Equal(t, arcp.CodeResumeWindowExpired, aerr.Code)
 	close(release)
+}
+
+// TestIdempotentRetryReplaysAccepted (#135) re-submits an unchanged job
+// under the same idempotency key from a fresh connection (same
+// principal) and asserts the original job.accepted is replayed (same
+// job id) and the agent runs only once.
+func TestIdempotentRetryReplaysAccepted(t *testing.T) {
+	srv := server.New(server.Options{})
+	defer srv.Close()
+	var runs int32
+	srv.RegisterAgent("once", func(ctx context.Context, _ json.RawMessage, jc *server.JobContext) (any, error) {
+		atomic.AddInt32(&runs, 1)
+		return map[string]bool{"ok": true}, nil
+	})
+	srvCtx, cancelSrv := context.WithCancel(context.Background())
+	defer cancelSrv()
+
+	a, b := transport.NewMemoryPair()
+	go func() { _ = srv.Accept(srvCtx, b) }()
+	cli, err := client.Connect(context.Background(), a, client.Options{ClientName: "app", Token: "demo"})
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	h1, err := cli.Submit(ctx, client.SubmitRequest{Agent: "once", IdempotencyKey: "k", Input: map[string]int{"v": 1}})
+	require.NoError(t, err)
+	_, err = h1.Wait(ctx)
+	require.NoError(t, err)
+	_ = cli.Close(context.Background())
+
+	// Fresh connection, same principal, identical submit.
+	a2, b2 := transport.NewMemoryPair()
+	go func() { _ = srv.Accept(srvCtx, b2) }()
+	cli2, err := client.Connect(context.Background(), a2, client.Options{ClientName: "app", Token: "demo"})
+	require.NoError(t, err)
+	defer cli2.Close(context.Background())
+	h2, err := cli2.Submit(ctx, client.SubmitRequest{Agent: "once", IdempotencyKey: "k", Input: map[string]int{"v": 1}})
+	require.NoError(t, err, "identical idempotent retry must replay job.accepted, not error")
+	require.Equal(t, h1.ID(), h2.ID(), "replayed job.accepted must carry the original job id")
+
+	time.Sleep(100 * time.Millisecond)
+	require.Equal(t, int32(1), atomic.LoadInt32(&runs), "agent must run only once for a replayed idempotent submit")
 }
 
 // helper to keep imports tidy across the audit test file.

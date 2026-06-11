@@ -5,24 +5,33 @@ package idstore
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"time"
 )
 
-// Entry is one stored mapping.
+// Entry is one stored mapping. ParamsHash is a canonical hash of the
+// original submit parameters (used to distinguish identical retries from
+// conflicting key reuse, §7.2) and Accepted caches the original
+// job.accepted payload so identical retries can be replayed.
 type Entry struct {
-	Principal string
-	Key       string
-	JobID     string
-	CreatedAt time.Time
+	Principal  string
+	Key        string
+	JobID      string
+	CreatedAt  time.Time
+	ParamsHash string
+	Accepted   json.RawMessage
 }
 
 // Store is the dedupe interface. PutIfAbsent inserts entry and returns
 // the stored entry plus true if the row is new; if a row already
-// exists, it returns the existing entry and false.
+// exists, it returns the existing entry and false. SetAccepted records
+// the original job.accepted payload for an existing entry so identical
+// retries can replay it.
 type Store interface {
 	PutIfAbsent(ctx context.Context, e Entry) (Entry, bool, error)
 	Get(ctx context.Context, principal, key string) (Entry, bool, error)
+	SetAccepted(ctx context.Context, principal, key string, accepted []byte) error
 	Sweep(ctx context.Context, olderThan time.Time) (int, error)
 }
 
@@ -61,6 +70,22 @@ func (s *Memory) PutIfAbsent(ctx context.Context, e Entry) (Entry, bool, error) 
 	}
 	s.m[k] = e
 	return e, true, nil
+}
+
+// SetAccepted records the original job.accepted payload for an existing
+// (principal, key) entry. It is a no-op if the entry is absent.
+func (s *Memory) SetAccepted(ctx context.Context, principal, key string, accepted []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	k := s.key(principal, key)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e, ok := s.m[k]; ok {
+		e.Accepted = append(json.RawMessage(nil), accepted...)
+		s.m[k] = e
+	}
+	return nil
 }
 
 // Get returns the entry for (principal, key) if present.

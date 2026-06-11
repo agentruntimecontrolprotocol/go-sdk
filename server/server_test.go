@@ -24,6 +24,9 @@ func (f *failingIDStore) PutIfAbsent(ctx context.Context, e idstore.Entry) (idst
 func (f *failingIDStore) Get(ctx context.Context, principal, key string) (idstore.Entry, bool, error) {
 	return idstore.Entry{}, false, nil
 }
+func (f *failingIDStore) SetAccepted(ctx context.Context, principal, key string, accepted []byte) error {
+	return nil
+}
 func (f *failingIDStore) Sweep(ctx context.Context, olderThan time.Time) (int, error) {
 	return 0, nil
 }

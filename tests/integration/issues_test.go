@@ -6,7 +6,6 @@ package integration_test
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -561,6 +560,9 @@ func (f failingIDStore) PutIfAbsent(ctx context.Context, e idstore.Entry) (idsto
 func (f failingIDStore) Get(ctx context.Context, principal, key string) (idstore.Entry, bool, error) {
 	return idstore.Entry{}, false, nil
 }
+func (f failingIDStore) SetAccepted(ctx context.Context, principal, key string, accepted []byte) error {
+	return nil
+}
 func (f failingIDStore) Sweep(ctx context.Context, olderThan time.Time) (int, error) { return 0, nil }
 
 // TestIdempotencyStoreErrorRejectsSubmit (#50) wires a failing idstore
@@ -591,14 +593,14 @@ func TestIdempotencyStoreErrorRejectsSubmit(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	h1, err := cli.Submit(ctx, client.SubmitRequest{Agent: "once", IdempotencyKey: "key-xyz"})
+	h1, err := cli.Submit(ctx, client.SubmitRequest{Agent: "once", IdempotencyKey: "key-xyz", Input: map[string]string{"v": "1"}})
 	require.NoError(t, err)
 	_, _ = h1.Wait(ctx)
-	// Second submit with the same key must fail.
-	_, err = cli.Submit(ctx, client.SubmitRequest{Agent: "once", IdempotencyKey: "key-xyz"})
+	// Second submit with the same key but CONFLICTING params must fail
+	// with DUPLICATE_KEY (§7.2).
+	_, err = cli.Submit(ctx, client.SubmitRequest{Agent: "once", IdempotencyKey: "key-xyz", Input: map[string]string{"v": "2"}})
 	require.Error(t, err)
-	var aerr *arcp.Error
-	require.True(t, errors.As(err, &aerr) || err != nil)
+	require.ErrorIs(t, err, arcp.ErrDuplicateKey)
 }
 
 // TestOptionsAreDocumentedCorrectly (#52) pins the actual behaviour of

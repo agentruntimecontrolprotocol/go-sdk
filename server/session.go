@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -659,12 +661,14 @@ func (s *session) handleJobSubmit(ctx context.Context, env arcp.Envelope) error 
 		job.discard()
 		return s.sendErrorFor(env, arcp.CodeInternalError, "job id collision")
 	}
+	paramsHash := submitParamsHash(req)
 	if req.IdempotencyKey != "" {
 		entry, fresh, err := s.srv.idStore.PutIfAbsent(ctx, idstore.Entry{
-			Principal: s.principal,
-			Key:       req.IdempotencyKey,
-			JobID:     job.id,
-			CreatedAt: s.srv.opts.Clock.Now(),
+			Principal:  s.principal,
+			Key:        req.IdempotencyKey,
+			JobID:      job.id,
+			CreatedAt:  s.srv.opts.Clock.Now(),
+			ParamsHash: paramsHash,
 		})
 		if err != nil {
 			s.srv.unregisterJob(job.id)
@@ -674,7 +678,15 @@ func (s *session) handleJobSubmit(ctx context.Context, env arcp.Envelope) error 
 		if !fresh {
 			s.srv.unregisterJob(job.id)
 			job.discard()
-			return s.sendErrorFor(env, arcp.CodeDuplicateKey, "idempotency key already used for job "+entry.JobID)
+			// §7.2: identical retry replays the original job.accepted;
+			// a conflicting reuse returns DUPLICATE_KEY.
+			if entry.ParamsHash != paramsHash {
+				return s.sendErrorFor(env, arcp.CodeDuplicateKey, "idempotency key reused with different parameters")
+			}
+			if len(entry.Accepted) == 0 {
+				return s.sendErrorFor(env, arcp.CodeInternalError, "idempotent submit still in progress")
+			}
+			return s.replayAccepted(env, entry)
 		}
 	}
 	accept := messages.JobAccepted{
@@ -712,8 +724,54 @@ func (s *session) handleJobSubmit(ctx context.Context, env arcp.Envelope) error 
 	aenv.JobID = job.id
 	aenv.TraceID = job.traceID
 	s.send(aenv)
+	// Cache the original job.accepted so an identical retry under the
+	// same idempotency_key can be replayed (§7.2).
+	if req.IdempotencyKey != "" {
+		if raw, mErr := json.Marshal(&accept); mErr == nil {
+			_ = s.srv.idStore.SetAccepted(ctx, s.principal, req.IdempotencyKey, raw)
+		}
+	}
 	go job.run()
 	return nil
+}
+
+// replayAccepted re-emits the cached job.accepted for an idempotent
+// retry that matches the original parameters.
+func (s *session) replayAccepted(reqEnv arcp.Envelope, entry idstore.Entry) error {
+	var acc messages.JobAccepted
+	if err := json.Unmarshal(entry.Accepted, &acc); err != nil {
+		return s.sendErrorFor(reqEnv, arcp.CodeInternalError, "cached job.accepted decode: "+err.Error())
+	}
+	out, err := arcp.NewEnvelope(messages.TypeJobAccepted, &acc)
+	if err != nil {
+		return err
+	}
+	out.JobID = acc.JobID
+	out.TraceID = acc.TraceID
+	s.send(out)
+	return nil
+}
+
+// submitParamsHash returns a canonical hash of the submit parameters
+// that define job identity for idempotency (§7.2), excluding the
+// idempotency key and trace id.
+func submitParamsHash(req messages.JobSubmit) string {
+	canon := struct {
+		Agent       string                     `json:"agent"`
+		Input       json.RawMessage            `json:"input,omitempty"`
+		Lease       arcp.Lease                 `json:"lease_request,omitempty"`
+		Constraints *messages.LeaseConstraints `json:"lease_constraints,omitempty"`
+		MaxRuntime  int                        `json:"max_runtime_sec,omitempty"`
+	}{
+		Agent:       req.Agent,
+		Input:       req.Input,
+		Lease:       req.LeaseRequest,
+		Constraints: req.LeaseConstraints,
+		MaxRuntime:  req.MaxRuntimeSec,
+	}
+	b, _ := json.Marshal(canon)
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 func leaseConstraintsFromState(t *time.Time) *messages.LeaseConstraints {
