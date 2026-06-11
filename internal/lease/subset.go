@@ -26,7 +26,7 @@ func IsSubset(parent, child arcp.Lease, parentRemaining map[arcp.Currency]float6
 			return arcp.ErrLeaseSubsetViolation.WithMessage("child lease has capability " + string(cap) + " missing from parent")
 		}
 		for _, cp := range patterns {
-			if !anyMatches(parentPatterns, cp) {
+			if !anyCovers(parentPatterns, cp) {
 				return arcp.ErrLeaseSubsetViolation.WithMessage("child pattern " + cp + " not covered by parent " + string(cap))
 			}
 		}
@@ -37,9 +37,14 @@ func IsSubset(parent, child arcp.Lease, parentRemaining map[arcp.Currency]float6
 	return nil
 }
 
-func anyMatches(parents []string, child string) bool {
+// anyCovers reports whether at least one parent pattern's language
+// includes every target matchable by the child pattern. It uses
+// pattern-inclusion (glob.Covers), not glob matching, so a child whose
+// own wildcards widen authority beyond the parent is rejected per
+// §9.4.
+func anyCovers(parents []string, child string) bool {
 	for _, p := range parents {
-		if glob.Match(p, child) {
+		if glob.Covers(p, child) {
 			return true
 		}
 	}

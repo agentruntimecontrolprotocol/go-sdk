@@ -240,3 +240,20 @@ func TestIsLeaseSubset(t *testing.T) {
 		t.Fatal("expected subset violation for missing capability")
 	}
 }
+
+// TestIsLeaseSubsetWildcardWidening covers #147: a child wildcard that
+// widens authority beyond the parent must be rejected even though the
+// child's pattern string glob-matches the parent.
+func TestIsLeaseSubsetWildcardWidening(t *testing.T) {
+	parent := arcp.Lease{arcp.CapFSRead: {"/data/*"}}
+	widen := arcp.Lease{arcp.CapFSRead: {"/data/**"}}
+	if err := arcp.IsLeaseSubset(parent, widen, nil, nil, nil); err == nil {
+		t.Fatal("expected LEASE_SUBSET_VIOLATION: /data/* must not cover /data/**")
+	}
+	// Inverse: parent ** legitimately covers child *.
+	wider := arcp.Lease{arcp.CapFSRead: {"/data/**"}}
+	narrow := arcp.Lease{arcp.CapFSRead: {"/data/*"}}
+	if err := arcp.IsLeaseSubset(wider, narrow, nil, nil, nil); err != nil {
+		t.Fatalf("parent /data/** must cover child /data/*, got %v", err)
+	}
+}

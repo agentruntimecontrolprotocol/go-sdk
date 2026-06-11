@@ -187,7 +187,7 @@ func IsLeaseSubset(parent, child Lease, parentRemaining map[Currency]float64, pa
 		for _, cp := range patterns {
 			matched := false
 			for _, p := range parentPatterns {
-				if globMatch(p, cp) {
+				if globCovers(p, cp) {
 					matched = true
 					break
 				}
@@ -248,6 +248,66 @@ func globMatchSegments(p, s []string) bool {
 		}
 		return globMatchSegments(rest, s[1:])
 	}
+}
+
+// globCovers reports whether every concrete target matched by the
+// child pattern is also matched by the parent pattern. Unlike
+// globMatch (pattern vs concrete string), it decides pattern-inclusion
+// so a child whose wildcards widen authority beyond the parent is
+// rejected per the §9.4/§10 delegation rules. It is sound (never
+// accepts a widening child) and conservative.
+func globCovers(parent, child string) bool {
+	var split = func(in string) []string {
+		if in == "" {
+			return nil
+		}
+		return strings.Split(in, "/")
+	}
+	return globCoversSegments(split(parent), split(child))
+}
+
+func globCoversSegments(p, c []string) bool {
+	if len(p) == 0 {
+		return len(c) == 0
+	}
+	head := p[0]
+	rest := p[1:]
+	switch head {
+	case "**":
+		for i := 0; i <= len(c); i++ {
+			if globCoversSegments(rest, c[i:]) {
+				return true
+			}
+		}
+		return false
+	case "*":
+		if len(c) == 0 || c[0] == "**" {
+			return false
+		}
+		return globCoversSegments(rest, c[1:])
+	default:
+		if len(c) == 0 {
+			return false
+		}
+		ch := c[0]
+		if ch == "*" || ch == "**" {
+			return false
+		}
+		if !globSegmentCovers(head, ch) {
+			return false
+		}
+		return globCoversSegments(rest, c[1:])
+	}
+}
+
+func globSegmentCovers(parent, child string) bool {
+	if parent == child {
+		return true
+	}
+	if strings.Contains(child, "*") {
+		return false
+	}
+	return globLiteralSegmentMatch(parent, child)
 }
 
 func globLiteralSegmentMatch(pat, s string) bool {

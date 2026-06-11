@@ -24,6 +24,39 @@ func TestIsSubsetModelUseExpanded(t *testing.T) {
 	}
 }
 
+// TestIsSubsetWildcardWideningRejected covers #147: a child whose
+// wildcard widens authority beyond the parent must be rejected even
+// though glob-matching the child pattern string against the parent
+// returns true.
+func TestIsSubsetWildcardWideningRejected(t *testing.T) {
+	parent := arcp.Lease{arcp.CapFSRead: {"/data/*"}}
+	child := arcp.Lease{arcp.CapFSRead: {"/data/**"}}
+	if err := lease.IsSubset(parent, child, nil, nil, nil); !errors.Is(err, arcp.ErrLeaseSubsetViolation) {
+		t.Fatalf("want LEASE_SUBSET_VIOLATION for /data/* covering /data/**, got %v", err)
+	}
+}
+
+// TestIsSubsetWildcardNarrowingAccepted is the inverse: a parent "**"
+// legitimately covers a child "*".
+func TestIsSubsetWildcardNarrowingAccepted(t *testing.T) {
+	parent := arcp.Lease{arcp.CapFSRead: {"/data/**"}}
+	child := arcp.Lease{arcp.CapFSRead: {"/data/*"}}
+	if err := lease.IsSubset(parent, child, nil, nil, nil); err != nil {
+		t.Fatalf("parent /data/** must cover child /data/*, got %v", err)
+	}
+}
+
+// TestIsSubsetIdenticalAccepted: identical patterns are always subsets.
+func TestIsSubsetIdenticalAccepted(t *testing.T) {
+	for _, p := range []string{"/data/*", "/data/**", "/data/a", "tier-fast/*"} {
+		parent := arcp.Lease{arcp.CapFSRead: {p}}
+		child := arcp.Lease{arcp.CapFSRead: {p}}
+		if err := lease.IsSubset(parent, child, nil, nil, nil); err != nil {
+			t.Fatalf("identical pattern %q must be a subset, got %v", p, err)
+		}
+	}
+}
+
 func TestIsSubsetBudgetOK(t *testing.T) {
 	parent := arcp.Lease{arcp.CapCostBudget: {"USD:10.00"}}
 	child := arcp.Lease{arcp.CapCostBudget: {"USD:1.00"}}
