@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync/atomic"
 	"testing"
@@ -342,16 +343,142 @@ func TestAgentResolverFallback(t *testing.T) {
 	}
 }
 
-// TestSkipUntilCursor covers the cursor-pagination helper.
-func TestSkipUntilCursor(t *testing.T) {
-	items := []messages.JobInfo{
-		{JobID: "a"}, {JobID: "b"}, {JobID: "c"}, {JobID: "d"},
+// TestCursorHelpers covers the composite (CreatedAt, JobID) cursor
+// encode/decode/compare helpers used by listJobs (#85, #142).
+func TestCursorHelpers(t *testing.T) {
+	base := time.Unix(0, 1_000)
+
+	// Empty cursor positions from the start (set == false).
+	if c := decodeCursor(""); c.set {
+		t.Fatal("empty cursor must not be set")
 	}
-	if got := skipUntilCursor(items, "b"); got != 2 {
-		t.Fatalf("cursor=b => %d, want 2", got)
+	// Unparseable composite timestamp falls back to start positioning.
+	if c := decodeCursor("notanumber|x"); c.set {
+		t.Fatal("invalid cursor timestamp must not be set")
 	}
-	if got := skipUntilCursor(items, "z"); got != len(items) {
-		t.Fatalf("cursor=z => %d, want %d", got, len(items))
+
+	// Legacy job-id-only cursor compares by id, matching the old behavior.
+	legacy := decodeCursor("b")
+	if !legacy.set || !legacy.legacy || legacy.legacyID != "b" {
+		t.Fatalf("legacy cursor parsed wrong: %+v", legacy)
+	}
+	if afterCursor(legacy, base, "a") || afterCursor(legacy, base, "b") {
+		t.Fatal("legacy cursor: a and b must not be after b")
+	}
+	if !afterCursor(legacy, base, "c") {
+		t.Fatal("legacy cursor: c must be after b")
+	}
+
+	// Composite cursor round-trips through encodeCursor and orders by
+	// (CreatedAt, JobID) with the timestamp dominating the id.
+	cur := decodeCursor(encodeCursor(messages.JobInfo{CreatedAt: base, JobID: "m"}))
+	if !cur.set || cur.legacy {
+		t.Fatalf("composite cursor parsed wrong: %+v", cur)
+	}
+	if afterCursor(cur, base, "m") || afterCursor(cur, base, "a") {
+		t.Fatal("same ts: id <= cursor id must not be after")
+	}
+	if !afterCursor(cur, base, "z") {
+		t.Fatal("same ts: larger id must be after")
+	}
+	if afterCursor(cur, base.Add(-time.Nanosecond), "zzz") {
+		t.Fatal("earlier ts must not be after regardless of id")
+	}
+	if !afterCursor(cur, base.Add(time.Nanosecond), "a") {
+		t.Fatal("later ts must be after regardless of id")
+	}
+}
+
+// TestListJobsBoundedPagination covers #142: a small page over a large job
+// table is selected without sorting/snapshotting every visible job, while
+// preserving stable (CreatedAt, JobID) ordering and cursor semantics.
+func TestListJobsBoundedPagination(t *testing.T) {
+	srv := New(Options{})
+	defer srv.Close()
+
+	const total = 500
+	base := time.Unix(1_700_000_000, 0)
+	want := make([]string, 0, total)
+	for i := 0; i < total; i++ {
+		id := fmt.Sprintf("job-%04d", i)
+		// Distinct, monotonically increasing CreatedAt so the expected
+		// order is simply ascending id.
+		j := &Job{
+			id: id, principal: "p", agent: "x",
+			createdAt: base.Add(time.Duration(i) * time.Millisecond),
+			statusV:   messages.StatusRunning,
+			session:   &session{srv: srv, id: "s", seq: srv.allocFor("s")},
+		}
+		srv.jobs[id] = j
+		want = append(want, id)
+	}
+
+	// Page through the full table in small pages and assert we observe
+	// every job exactly once, in ascending order.
+	var got []string
+	cursor := ""
+	const pageSize = 10
+	for pages := 0; ; pages++ {
+		if pages > total/pageSize+2 {
+			t.Fatal("pagination did not terminate")
+		}
+		page, next, err := srv.listJobs("p", messages.ListJobsFilter{}, pageSize, cursor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page) > pageSize {
+			t.Fatalf("page exceeded limit: %d", len(page))
+		}
+		for _, info := range page {
+			got = append(got, info.JobID)
+		}
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+
+	if len(got) != total {
+		t.Fatalf("paged %d jobs, want %d", len(got), total)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("order mismatch at %d: got %s want %s", i, got[i], want[i])
+		}
+	}
+
+	// A status filter that matches nothing returns an empty page and no
+	// cursor, without panicking on the deferred snapshot path.
+	page, next, err := srv.listJobs("p", messages.ListJobsFilter{Status: []string{messages.StatusError}}, pageSize, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 0 || next != "" {
+		t.Fatalf("filtered-empty page=%d next=%q", len(page), next)
+	}
+}
+
+// BenchmarkListJobsLargeTable exercises a small page request against a large
+// job table to guard the bounded-selection path (#142).
+func BenchmarkListJobsLargeTable(b *testing.B) {
+	srv := New(Options{})
+	defer srv.Close()
+	const total = 10_000
+	base := time.Unix(1_700_000_000, 0)
+	for i := 0; i < total; i++ {
+		id := fmt.Sprintf("job-%05d", i)
+		srv.jobs[id] = &Job{
+			id: id, principal: "p", agent: "x",
+			createdAt: base.Add(time.Duration(i) * time.Millisecond),
+			statusV:   messages.StatusRunning,
+			session:   &session{srv: srv, id: "s", seq: srv.allocFor("s")},
+		}
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, _, err := srv.listJobs("p", messages.ListJobsFilter{}, 20, ""); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"container/heap"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -642,36 +643,153 @@ func (s *Server) unregisterJob(id string) {
 }
 
 func (s *Server) listJobs(principal string, filter messages.ListJobsFilter, limit int, cursor string) ([]messages.JobInfo, string, error) {
+	cur := decodeCursor(cursor)
+
+	// Snapshot only immutable ordering/identity fields under the read
+	// lock. Status (the only mutable filter input) and the full JobInfo
+	// snapshot are deferred until after cheap filtering, so a page request
+	// never snapshots — let alone sorts — every visible job (#142).
+	type jobRef struct {
+		job       *Job
+		id        string
+		agent     string
+		createdAt time.Time
+	}
 	s.mu.RLock()
-	jobs := make([]*Job, 0, len(s.jobs))
+	refs := make([]jobRef, 0, len(s.jobs))
 	for _, j := range s.jobs {
 		if j.principal == principal {
-			jobs = append(jobs, j)
+			refs = append(refs, jobRef{job: j, id: j.id, agent: j.agent, createdAt: j.createdAt})
 		}
 	}
 	s.mu.RUnlock()
-	var out []messages.JobInfo
-	for _, j := range jobs {
-		info := j.snapshot()
-		if !filterMatch(filter, info) {
+
+	var statusSet map[string]struct{}
+	if len(filter.Status) > 0 {
+		statusSet = make(map[string]struct{}, len(filter.Status))
+		for _, st := range filter.Status {
+			statusSet[st] = struct{}{}
+		}
+	}
+
+	// matches applies the cheap immutable filters first and only reads the
+	// per-job status lock when a status filter is actually present.
+	matches := func(ref jobRef) bool {
+		if filter.Agent != "" && ref.agent != filter.Agent {
+			return false
+		}
+		// Inclusive bounds, consistent with filterMatch (#84).
+		if filter.CreatedAfter != nil && ref.createdAt.Before(*filter.CreatedAfter) {
+			return false
+		}
+		if filter.CreatedBefore != nil && ref.createdAt.After(*filter.CreatedBefore) {
+			return false
+		}
+		if statusSet != nil {
+			if _, ok := statusSet[ref.job.status()]; !ok {
+				return false
+			}
+		}
+		return true
+	}
+
+	// Unbounded request (limit <= 0): the caller asked for everything, so a
+	// full materialization and sort is inherent.
+	if limit <= 0 {
+		var out []messages.JobInfo
+		for _, ref := range refs {
+			if cur.set && !afterCursor(cur, ref.createdAt, ref.id) {
+				continue
+			}
+			if !matches(ref) {
+				continue
+			}
+			out = append(out, ref.job.snapshot())
+		}
+		sort.Slice(out, func(i, j int) bool {
+			if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+				return out[i].JobID < out[j].JobID
+			}
+			return out[i].CreatedAt.Before(out[j].CreatedAt)
+		})
+		return out, "", nil
+	}
+
+	// Bounded page: keep only the smallest limit+1 matching refs after the
+	// cursor in a max-heap. This is O(n log limit) and never sorts the full
+	// visible set; only the returned page is snapshotted (#142).
+	keep := limit + 1
+	h := &maxJobHeap{}
+	for _, ref := range refs {
+		if cur.set && !afterCursor(cur, ref.createdAt, ref.id) {
 			continue
 		}
-		out = append(out, info)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
-			return out[i].JobID < out[j].JobID
+		if !matches(ref) {
+			continue
 		}
-		return out[i].CreatedAt.Before(out[j].CreatedAt)
-	})
-	if cursor != "" {
-		out = out[skipUntilCursor(out, cursor):]
+		e := jobEntry{createdAt: ref.createdAt, id: ref.id, job: ref.job}
+		if h.Len() < keep {
+			heap.Push(h, e)
+			continue
+		}
+		// Drop the current largest if this entry sorts before it.
+		if jobEntryLess(e, (*h)[0]) {
+			(*h)[0] = e
+			heap.Fix(h, 0)
+		}
 	}
-	if limit > 0 && len(out) > limit {
-		next := encodeCursor(out[limit-1])
-		return out[:limit], next, nil
+
+	// Drain the heap into ascending (CreatedAt, JobID) order.
+	page := make([]jobEntry, h.Len())
+	for i := len(page) - 1; i >= 0; i-- {
+		page[i] = heap.Pop(h).(jobEntry)
 	}
-	return out, "", nil
+
+	out := make([]messages.JobInfo, 0, limit)
+	var next string
+	for i, e := range page {
+		if i == limit {
+			// A (limit+1)-th match exists: more pages remain. The cursor
+			// points at the last returned item.
+			next = encodeCursor(out[limit-1])
+			break
+		}
+		out = append(out, e.job.snapshot())
+	}
+	return out, next, nil
+}
+
+// jobEntry is a lightweight, snapshot-free handle used for cursor ordering
+// and bounded page selection in listJobs.
+type jobEntry struct {
+	createdAt time.Time
+	id        string
+	job       *Job
+}
+
+// jobEntryLess reports whether a sorts before b in list order:
+// CreatedAt ascending, then JobID ascending.
+func jobEntryLess(a, b jobEntry) bool {
+	if a.createdAt.Equal(b.createdAt) {
+		return a.id < b.id
+	}
+	return a.createdAt.Before(b.createdAt)
+}
+
+// maxJobHeap is a max-heap (largest in list order at the root) used to retain
+// the smallest limit+1 entries while scanning the visible jobs once.
+type maxJobHeap []jobEntry
+
+func (h maxJobHeap) Len() int           { return len(h) }
+func (h maxJobHeap) Less(i, j int) bool { return jobEntryLess(h[j], h[i]) }
+func (h maxJobHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *maxJobHeap) Push(x any)        { *h = append(*h, x.(jobEntry)) }
+func (h *maxJobHeap) Pop() any {
+	old := *h
+	n := len(old)
+	it := old[n-1]
+	*h = old[:n-1]
+	return it
 }
 
 // encodeCursor builds a composite cursor from the sort key
@@ -681,31 +799,42 @@ func encodeCursor(info messages.JobInfo) string {
 	return strconv.FormatInt(info.CreatedAt.UnixNano(), 10) + "|" + info.JobID
 }
 
-// skipUntilCursor returns the index of the first item strictly after the
-// composite (CreatedAt, JobID) cursor, matching the list ordering.
-func skipUntilCursor(items []messages.JobInfo, cursor string) int {
+// decodedCursor is the parsed form of a list cursor. It carries the same
+// stable (CreatedAt, JobID) key used for ordering (#142).
+type decodedCursor struct {
+	set      bool
+	legacy   bool
+	legacyID string
+	ts       int64
+	id       string
+}
+
+// decodeCursor parses a composite "<unixNano>|<jobID>" cursor. An empty or
+// unparseable cursor positions from the start (set == false), matching the
+// previous tolerant behavior.
+func decodeCursor(cursor string) decodedCursor {
+	if cursor == "" {
+		return decodedCursor{}
+	}
 	sep := strings.IndexByte(cursor, '|')
 	if sep < 0 {
-		// Legacy job-id-only cursor: fall back to the old behavior.
-		for i, it := range items {
-			if it.JobID > cursor {
-				return i
-			}
-		}
-		return len(items)
+		// Legacy job-id-only cursor.
+		return decodedCursor{set: true, legacy: true, legacyID: cursor}
 	}
 	ts, err := strconv.ParseInt(cursor[:sep], 10, 64)
 	if err != nil {
-		return 0
+		return decodedCursor{}
 	}
-	curID := cursor[sep+1:]
-	for i, it := range items {
-		itTS := it.CreatedAt.UnixNano()
-		if itTS > ts || (itTS == ts && it.JobID > curID) {
-			return i
-		}
+	return decodedCursor{set: true, ts: ts, id: cursor[sep+1:]}
+}
+
+// afterCursor reports whether (createdAt, id) sorts strictly after the cursor.
+func afterCursor(cur decodedCursor, createdAt time.Time, id string) bool {
+	if cur.legacy {
+		return id > cur.legacyID
 	}
-	return len(items)
+	ts := createdAt.UnixNano()
+	return ts > cur.ts || (ts == cur.ts && id > cur.id)
 }
 
 func filterMatch(f messages.ListJobsFilter, info messages.JobInfo) bool {
