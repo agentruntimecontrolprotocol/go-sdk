@@ -241,6 +241,22 @@ func TestIsLeaseSubset(t *testing.T) {
 	}
 }
 
+// TestWithDetailsDoesNotMutateReceiver covers #59: WithDetails must not
+// alias/mutate the receiver's Details map (the sentinels are shared).
+func TestWithDetailsDoesNotMutateReceiver(t *testing.T) {
+	base := arcp.ErrInvalidRequest.WithDetails(map[string]any{"a": 1})
+	derived := base.WithDetails(map[string]any{"b": 2})
+	if _, ok := base.Details["b"]; ok {
+		t.Fatal("WithDetails mutated the receiver's Details map")
+	}
+	if _, ok := derived.Details["a"]; !ok {
+		t.Fatal("derived error lost inherited detail 'a'")
+	}
+	if _, ok := derived.Details["b"]; !ok {
+		t.Fatal("derived error missing new detail 'b'")
+	}
+}
+
 // TestIsLeaseSubsetWildcardWidening covers #147: a child wildcard that
 // widens authority beyond the parent must be rejected even though the
 // child's pattern string glob-matches the parent.

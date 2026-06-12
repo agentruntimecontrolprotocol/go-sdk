@@ -7,16 +7,27 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 
 	arcp "github.com/agentruntimecontrolprotocol/go-sdk"
 )
 
+// defaultStdioMaxLine bounds a single NDJSON line. The default
+// bufio.Scanner token size is only 64 KiB, which would kill the
+// transport on any larger envelope; this mirrors the 1 MiB WebSocket
+// ReadLimit default.
+const defaultStdioMaxLine = 1 << 20
+
 // NewStdioTransport wraps an io.Reader / io.Writer pair as a Transport
-// using NDJSON framing (one JSON envelope per line). Closes the reader
-// and writer (if they are io.Closer) when Close is called.
+// using NDJSON framing (one JSON envelope per line). Lines up to 1 MiB
+// are accepted; larger lines fail the read with an explicit error
+// rather than silently truncating. Closes the reader and writer (if
+// they are io.Closer) when Close is called.
 func NewStdioTransport(in io.Reader, out io.Writer) Transport {
+	sc := bufio.NewScanner(in)
+	sc.Buffer(make([]byte, 0, 64*1024), defaultStdioMaxLine)
 	t := &stdioTransport{
-		scanner: bufio.NewScanner(in),
+		scanner: sc,
 		out:     out,
 		in:      in,
 		recvCh:  make(chan recvResult, 1),
@@ -36,7 +47,7 @@ type stdioTransport struct {
 	out     io.Writer
 	in      io.Reader
 	writeM  sync.Mutex
-	closed  atomicBool
+	closed  atomic.Bool
 	// recvCh feeds the dedicated reader goroutine's decoded envelopes
 	// (or errors) into Recv. Sized to 1; the reader blocks on the
 	// next scan after each delivery, so Recv is the back-pressure
@@ -49,7 +60,7 @@ type stdioTransport struct {
 
 // Send writes env as one NDJSON line.
 func (t *stdioTransport) Send(ctx context.Context, env arcp.Envelope) error {
-	if t.closed.Get() {
+	if t.closed.Load() {
 		return ErrClosed
 	}
 	if env.ARCP == "" {
@@ -95,6 +106,9 @@ func (t *stdioTransport) readerLoop() {
 	for {
 		if !t.scanner.Scan() {
 			err := t.scanner.Err()
+			if errors.Is(err, bufio.ErrTooLong) {
+				err = arcp.ErrInvalidRequest.WithMessage("NDJSON line exceeds maximum size")
+			}
 			if err == nil {
 				err = io.EOF
 			}
@@ -125,7 +139,7 @@ func (t *stdioTransport) readerLoop() {
 // Close releases the underlying reader/writer if they implement
 // io.Closer. Closing the reader unblocks the dedicated scan goroutine.
 func (t *stdioTransport) Close() error {
-	if !t.closed.Set(true) {
+	if !t.closed.CompareAndSwap(false, true) {
 		return nil
 	}
 	var firstErr error

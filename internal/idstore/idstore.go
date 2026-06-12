@@ -40,10 +40,12 @@ type Memory struct {
 	mu  sync.Mutex
 	m   map[string]Entry
 	ttl time.Duration
+	now func() time.Time
 }
 
 // NewMemory returns a Memory store with the given TTL. Zero ttl uses
-// 24 hours.
+// 24 hours. The default-timestamp clock is wall time; inject a
+// deterministic source with SetClock.
 func NewMemory(ttl time.Duration) *Memory {
 	if ttl == 0 {
 		ttl = 24 * time.Hour
@@ -51,7 +53,20 @@ func NewMemory(ttl time.Duration) *Memory {
 	return &Memory{
 		m:   map[string]Entry{},
 		ttl: ttl,
+		now: time.Now,
 	}
+}
+
+// SetClock overrides the source used to fill a zero Entry.CreatedAt so
+// library callers can avoid ambient time.Now and make dedupe/sweep tests
+// deterministic (#62). A nil argument is ignored.
+func (s *Memory) SetClock(now func() time.Time) {
+	if now == nil {
+		return
+	}
+	s.mu.Lock()
+	s.now = now
+	s.mu.Unlock()
 }
 
 // PutIfAbsent inserts e if no entry exists for (principal, key).
@@ -66,7 +81,7 @@ func (s *Memory) PutIfAbsent(ctx context.Context, e Entry) (Entry, bool, error) 
 		return existing, false, nil
 	}
 	if e.CreatedAt.IsZero() {
-		e.CreatedAt = time.Now()
+		e.CreatedAt = s.now()
 	}
 	s.m[k] = e
 	return e, true, nil

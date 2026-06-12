@@ -7,10 +7,12 @@ import (
 	arcp "github.com/agentruntimecontrolprotocol/go-sdk"
 )
 
-// LogBody is the body of a "log" event.
+// LogBody is the body of a "log" event. Fields carries the structured
+// slog.Attr key/values passed to JobContext.Log.
 type LogBody struct {
-	Level   string `json:"level"`
-	Message string `json:"message"`
+	Level   string         `json:"level"`
+	Message string         `json:"message"`
+	Fields  map[string]any `json:"fields,omitempty"`
 }
 
 // ThoughtBody is the body of a "thought" event.

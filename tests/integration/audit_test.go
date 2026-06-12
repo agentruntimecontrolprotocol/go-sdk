@@ -777,5 +777,188 @@ func TestCollectChunksRespectsCap(t *testing.T) {
 	require.Error(t, err, "CollectChunks must reject a stream exceeding MaxAssembledBytes")
 }
 
+// TestTerminalJobsAreUnregistered (#81) completes jobs and asserts they
+// no longer appear in ListJobs (the jobs map does not grow unboundedly).
+func TestTerminalJobsAreUnregistered(t *testing.T) {
+	srv := server.New(server.Options{})
+	defer srv.Close()
+	srv.RegisterAgent("quick", func(ctx context.Context, _ json.RawMessage, jc *server.JobContext) (any, error) {
+		return map[string]bool{"ok": true}, nil
+	})
+	a, b := transport.NewMemoryPair()
+	srvCtx, cancelSrv := context.WithCancel(context.Background())
+	defer cancelSrv()
+	go func() { _ = srv.Accept(srvCtx, b) }()
+	cli, err := client.Connect(context.Background(), a, client.Options{Token: "demo"})
+	require.NoError(t, err)
+	defer cli.Close(context.Background())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for i := 0; i < 5; i++ {
+		h, err := cli.Submit(ctx, client.SubmitRequest{Agent: "quick"})
+		require.NoError(t, err)
+		_, err = h.Wait(ctx)
+		require.NoError(t, err)
+	}
+	require.Eventually(t, func() bool {
+		jobs, lerr := cli.ListJobs(ctx, client.ListJobsRequest{})
+		return lerr == nil && len(jobs.Jobs) == 0
+	}, 3*time.Second, 20*time.Millisecond, "terminal jobs must be unregistered")
+}
+
+// TestHeartbeatLostSendsSessionError (#87) lets the inbound watchdog
+// fire and asserts a HEARTBEAT_LOST session.error precedes the drop.
+func TestHeartbeatLostSendsSessionError(t *testing.T) {
+	srv := server.New(server.Options{HeartbeatInterval: time.Second})
+	defer srv.Close()
+	a, b := transport.NewMemoryPair()
+	srvCtx, cancelSrv := context.WithCancel(context.Background())
+	defer cancelSrv()
+	go func() { _ = srv.Accept(srvCtx, b) }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// Negotiate heartbeat but then go silent so the watchdog (2s) fires.
+	hello, _ := arcp.NewEnvelope(messages.TypeSessionHello, &messages.SessionHello{
+		Client:       messages.ClientInfo{Name: "t"},
+		Auth:         messages.AuthInfo{Token: "x"},
+		Capabilities: messages.HelloCapabilities{Features: []string{"heartbeat"}},
+	})
+	require.NoError(t, a.Send(ctx, hello))
+	if _, err := a.Recv(ctx); err != nil { // welcome
+		t.Fatal(err)
+	}
+	// Read until we observe the heartbeat-lost session.error. Respond to
+	// nothing so the watchdog fires; ignore server pings.
+	gotErr := false
+	for i := 0; i < 20 && !gotErr; i++ {
+		env, err := a.Recv(ctx)
+		if err != nil {
+			break
+		}
+		if env.Type == messages.TypeSessionError {
+			var se messages.SessionError
+			_ = env.DecodePayload(&se)
+			if se.Code == arcp.CodeHeartbeatLost {
+				gotErr = true
+			}
+		}
+	}
+	require.True(t, gotErr, "server must send HEARTBEAT_LOST session.error before dropping")
+}
+
+// TestLogAttrsAreWired (#71) asserts slog.Attr args passed to
+// JobContext.Log appear in the emitted log event's fields.
+func TestLogAttrsAreWired(t *testing.T) {
+	srv := server.New(server.Options{})
+	defer srv.Close()
+	srv.RegisterAgent("logger", func(ctx context.Context, _ json.RawMessage, jc *server.JobContext) (any, error) {
+		jc.Log(slog.LevelInfo, "hello", slog.String("user", "alice"), slog.Int("count", 7))
+		return nil, nil
+	})
+	a, b := transport.NewMemoryPair()
+	srvCtx, cancelSrv := context.WithCancel(context.Background())
+	defer cancelSrv()
+	go func() { _ = srv.Accept(srvCtx, b) }()
+	cli, err := client.Connect(context.Background(), a, client.Options{Token: "demo"})
+	require.NoError(t, err)
+	defer cli.Close(context.Background())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	h, err := cli.Submit(ctx, client.SubmitRequest{Agent: "logger"})
+	require.NoError(t, err)
+
+	var fields map[string]any
+	for ev := range h.Events() {
+		if ev.Kind != messages.KindLog {
+			continue
+		}
+		var lb messages.LogBody
+		require.NoError(t, json.Unmarshal(ev.Body, &lb))
+		fields = lb.Fields
+		break
+	}
+	require.NotNil(t, fields, "log attrs must be wired into the event body")
+	require.Equal(t, "alice", fields["user"])
+}
+
+// TestToolResultMarshalErrorSurfaces (#72) emits a tool_result for an
+// unmarshalable value and asserts it carries a structured error instead
+// of a malformed event.
+func TestToolResultMarshalErrorSurfaces(t *testing.T) {
+	srv := server.New(server.Options{})
+	defer srv.Close()
+	srv.RegisterAgent("badtool", func(ctx context.Context, _ json.RawMessage, jc *server.JobContext) (any, error) {
+		// channels are not JSON-serializable.
+		jc.ToolResult("call-1", make(chan int))
+		return nil, nil
+	})
+	a, b := transport.NewMemoryPair()
+	srvCtx, cancelSrv := context.WithCancel(context.Background())
+	defer cancelSrv()
+	go func() { _ = srv.Accept(srvCtx, b) }()
+	cli, err := client.Connect(context.Background(), a, client.Options{Token: "demo"})
+	require.NoError(t, err)
+	defer cli.Close(context.Background())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	h, err := cli.Submit(ctx, client.SubmitRequest{Agent: "badtool"})
+	require.NoError(t, err)
+
+	var tr messages.ToolResultBody
+	got := false
+	for ev := range h.Events() {
+		if ev.Kind != messages.KindToolResult {
+			continue
+		}
+		require.NoError(t, json.Unmarshal(ev.Body, &tr))
+		got = true
+		break
+	}
+	require.True(t, got, "expected a tool_result event")
+	require.NotNil(t, tr.Error, "marshal failure must surface as a tool_result error")
+	require.Equal(t, arcp.CodeInternalError, tr.Error.Code)
+}
+
+// TestSeqGapDetection (#141) injects a synthetic envelope whose
+// event_seq skips the expected value and asserts the client (with
+// DetectSeqGaps enabled) closes the session and surfaces an error
+// rather than silently accepting the gap.
+func TestSeqGapDetection(t *testing.T) {
+	a, b := transport.NewMemoryPair()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go func() {
+		if _, err := b.Recv(ctx); err != nil {
+			return
+		}
+		welcome, _ := arcp.NewEnvelope(messages.TypeSessionWelcome, &messages.SessionWelcome{})
+		welcome.SessionID = "s"
+		_ = b.Send(ctx, welcome)
+		// seq 1 then a jump to seq 5 (gap).
+		for _, seq := range []uint64{1, 5} {
+			ev, _ := arcp.NewEnvelope(messages.TypeJobEvent, &messages.JobEvent{Kind: messages.KindLog})
+			ev.SessionID = "s"
+			ev.JobID = "j"
+			ev.EventSeq = seq
+			_ = b.Send(ctx, ev)
+		}
+	}()
+
+	cli, err := client.Connect(ctx, a, client.Options{Token: "demo", DetectSeqGaps: true})
+	require.NoError(t, err)
+	defer cli.Close(context.Background())
+
+	// The client should close its own context upon detecting the gap.
+	select {
+	case <-cli.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("client did not close the session after a seq gap")
+	}
+}
+
 // helper to keep imports tidy across the audit test file.
 var _ = strings.Contains

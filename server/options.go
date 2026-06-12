@@ -4,6 +4,7 @@
 package server
 
 import (
+	"io"
 	"log/slog"
 	"time"
 
@@ -23,7 +24,9 @@ type Options struct {
 	// watchdog (which expires at 2*HeartbeatInterval of silence). Zero
 	// is replaced with the 30s default in withDefaults; to suppress
 	// heartbeats entirely, omit the "heartbeat" feature from
-	// Options.Features.
+	// Options.Features. Sub-second values are not supported: the wire
+	// field is whole seconds, so a non-zero interval below 1s is rounded
+	// up to 1s in withDefaults to avoid advertising 0.
 	HeartbeatInterval time.Duration
 	// ResumeWindow seeds resume_window_sec; default 600s.
 	ResumeWindow time.Duration
@@ -54,6 +57,12 @@ type Options struct {
 	MaxResultBytes int64
 	// ChunkSize caps an individual result_chunk body. Zero uses 1MiB.
 	ChunkSize int64
+	// EventLogSize is the per-session event-log retention (entries kept
+	// for resume/subscribe replay). Zero uses 10000.
+	EventLogSize int
+	// OutboxBuffer is the per-session outbound channel capacity. Zero
+	// uses 128.
+	OutboxBuffer int
 }
 
 func (o Options) withDefaults() Options {
@@ -65,12 +74,18 @@ func (o Options) withDefaults() Options {
 	}
 	if o.HeartbeatInterval == 0 {
 		o.HeartbeatInterval = 30 * time.Second
+	} else if o.HeartbeatInterval < time.Second {
+		// The wire field is whole seconds; round sub-second intervals up
+		// to 1s so welcome never advertises 0 (#96).
+		o.HeartbeatInterval = time.Second
 	}
 	if o.ResumeWindow == 0 {
 		o.ResumeWindow = 10 * time.Minute
 	}
 	if o.Logger == nil {
-		o.Logger = slog.Default()
+		// Default to a discard logger so importing the server produces
+		// no ambient output; callers opt in by setting Options.Logger.
+		o.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	if o.Clock == nil {
 		o.Clock = clock.Real()
@@ -80,6 +95,12 @@ func (o Options) withDefaults() Options {
 	}
 	if o.ChunkSize == 0 {
 		o.ChunkSize = 1 << 20
+	}
+	if o.EventLogSize <= 0 {
+		o.EventLogSize = 10_000
+	}
+	if o.OutboxBuffer <= 0 {
+		o.OutboxBuffer = 128
 	}
 	return o
 }

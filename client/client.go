@@ -169,6 +169,11 @@ func (c *Client) Features() []string { return c.features }
 // HasFeature reports whether name was negotiated.
 func (c *Client) HasFeature(name string) bool { return arcp.HasFeature(c.features, name) }
 
+// Done returns a channel closed when the client's session ends — on
+// Close, on a transport failure, or (with DetectSeqGaps) on a detected
+// event_seq gap. Callers can use it to trigger a Resume.
+func (c *Client) Done() <-chan struct{} { return c.ctx.Done() }
+
 // HighestSeq returns the largest event_seq the client has seen on
 // this session, suitable as the LastEventSeq value when constructing
 // a messages.ResumeRequest for a subsequent reconnect.
@@ -223,6 +228,19 @@ func (c *Client) readLoop() {
 			return
 		}
 		if env.EventSeq > 0 {
+			// §8.3 gap detection (opt-in): a forward jump in event_seq
+			// means we missed events; treat the session as broken so the
+			// caller can resume (#141).
+			if c.opts.DetectSeqGaps {
+				prev := c.highSeq.Load()
+				if prev > 0 && env.EventSeq > prev+1 {
+					c.failAll(arcp.ErrInternalError.WithMessage(
+						"event_seq gap detected; session should be resumed"))
+					c.cancel()
+					_ = c.transport.Close()
+					return
+				}
+			}
 			// Monotonically track the high-water mark; a replayed or
 			// out-of-order envelope must never regress it (#103).
 			for {

@@ -38,6 +38,11 @@ type session struct {
 
 	sendMu       sync.Mutex
 	outboxClosed bool
+	// sendWG tracks in-flight outbox enqueues so closeOutbox can wait
+	// for them to finish before closing the channel, letting enqueue
+	// perform its (possibly blocking) channel send without holding
+	// sendMu the whole time (#83).
+	sendWG sync.WaitGroup
 
 	// hbMu guards heartbeatTimer, the outbound session.ping ticker.
 	// Per §6.4 idleness is measured per-direction: the timer is reset
@@ -122,44 +127,19 @@ func (srv *Server) handshake(ctx context.Context, t transport.Transport) (*sessi
 		}
 		feats := arcp.IntersectFeatures(srv.features(), hello.Capabilities.Features)
 		newToken := arcp.NewULID()
-		welcome := messages.SessionWelcome{
-			Runtime:              messages.RuntimeInfo{Name: srv.opts.Name, Version: srv.opts.Version},
-			ResumeToken:          newToken,
-			ResumeWindowSec:      int(srv.opts.ResumeWindow / time.Second),
-			HeartbeatIntervalSec: int(srv.opts.HeartbeatInterval / time.Second),
-			Capabilities: messages.WelcomeCapabilities{
-				Encodings: []string{"json"},
-				Features:  feats,
-				Agents:    srv.inventory(),
-			},
-		}
-		wenv, err := arcp.NewEnvelope(messages.TypeSessionWelcome, &welcome)
+		wenv, err := srv.buildWelcome(entry.sessionID, newToken, feats)
 		if err != nil {
 			return nil, err
 		}
-		wenv.SessionID = entry.sessionID
 		if err := t.Send(ctx, wenv); err != nil {
 			return nil, fmt.Errorf("send welcome: %w", err)
 		}
 		sctx, cancel := context.WithCancel(ctx)
 		alloc := srv.allocFor(entry.sessionID)
 		alloc.setIfGreater(entry.seq)
-		s := &session{
-			srv:         srv,
-			id:          entry.sessionID,
-			principal:   principal,
-			transport:   t,
-			features:    feats,
-			clientCap:   hello.Capabilities,
-			ctx:         sctx,
-			cancel:      cancel,
-			outbox:      make(chan arcp.Envelope, 128),
-			seq:         alloc,
-			resumeToken: newToken,
-			isResume:    true,
-			replayFrom:  hello.Resume.LastEventSeq,
-		}
-		s.backPressureArmed.Store(true)
+		s := srv.newSession(entry.sessionID, principal, t, feats, hello.Capabilities, sctx, cancel, alloc, newToken)
+		s.isResume = true
+		s.replayFrom = hello.Resume.LastEventSeq
 		// The buffered-event replay is deferred to run(): doing it here
 		// (before writeLoop exists to drain the outbox) deadlocks once
 		// more than the outbox capacity is buffered (#146).
@@ -168,9 +148,24 @@ func (srv *Server) handshake(ctx context.Context, t transport.Transport) (*sessi
 	sessionID := arcp.NewSessionID()
 	feats := arcp.IntersectFeatures(srv.features(), hello.Capabilities.Features)
 	resumeToken := arcp.NewULID()
+	wenv, err := srv.buildWelcome(sessionID, resumeToken, feats)
+	if err != nil {
+		return nil, err
+	}
+	if err := t.Send(ctx, wenv); err != nil {
+		return nil, fmt.Errorf("send welcome: %w", err)
+	}
+	sctx, cancel := context.WithCancel(ctx)
+	s := srv.newSession(sessionID, principal, t, feats, hello.Capabilities, sctx, cancel, srv.allocFor(sessionID), resumeToken)
+	return s, nil
+}
+
+// buildWelcome constructs the session.welcome envelope shared by the
+// fresh and resume handshake paths (#99).
+func (srv *Server) buildWelcome(sessionID, token string, feats []string) (arcp.Envelope, error) {
 	welcome := messages.SessionWelcome{
 		Runtime:              messages.RuntimeInfo{Name: srv.opts.Name, Version: srv.opts.Version},
-		ResumeToken:          resumeToken,
+		ResumeToken:          token,
 		ResumeWindowSec:      int(srv.opts.ResumeWindow / time.Second),
 		HeartbeatIntervalSec: int(srv.opts.HeartbeatInterval / time.Second),
 		Capabilities: messages.WelcomeCapabilities{
@@ -181,28 +176,31 @@ func (srv *Server) handshake(ctx context.Context, t transport.Transport) (*sessi
 	}
 	wenv, err := arcp.NewEnvelope(messages.TypeSessionWelcome, &welcome)
 	if err != nil {
-		return nil, err
+		return arcp.Envelope{}, err
 	}
 	wenv.SessionID = sessionID
-	if err := t.Send(ctx, wenv); err != nil {
-		return nil, fmt.Errorf("send welcome: %w", err)
-	}
-	sctx, cancel := context.WithCancel(ctx)
+	return wenv, nil
+}
+
+// newSession constructs a session struct shared by both handshake paths
+// (#99). The outbox capacity is configurable via Options.OutboxBuffer
+// (#98).
+func (srv *Server) newSession(id, principal string, t transport.Transport, feats []string, clientCap messages.HelloCapabilities, ctx context.Context, cancel context.CancelFunc, seq *seqAlloc, resumeToken string) *session {
 	s := &session{
 		srv:         srv,
-		id:          sessionID,
+		id:          id,
 		principal:   principal,
 		transport:   t,
 		features:    feats,
-		clientCap:   hello.Capabilities,
-		ctx:         sctx,
+		clientCap:   clientCap,
+		ctx:         ctx,
 		cancel:      cancel,
-		outbox:      make(chan arcp.Envelope, 128),
-		seq:         srv.allocFor(sessionID),
+		outbox:      make(chan arcp.Envelope, srv.opts.OutboxBuffer),
+		seq:         seq,
 		resumeToken: resumeToken,
 	}
 	s.backPressureArmed.Store(true)
-	return s, nil
+	return s
 }
 
 func sendSessionError(ctx context.Context, t transport.Transport, sessionID string, code arcp.ErrorCode, msg string) error {
@@ -249,22 +247,40 @@ func (s *session) send(env arcp.Envelope) {
 	cur.enqueue(env)
 }
 
+// sendEphemeral delivers env to the live session for this id WITHOUT
+// persisting it to the event log. Used for credential rotation, whose
+// payload carries a secret that must never enter the replayable log.
+func (s *session) sendEphemeral(env arcp.Envelope) {
+	env.SessionID = s.id
+	cur := s.srv.currentSession(s.id)
+	if cur == nil {
+		cur = s
+	}
+	cur.enqueue(env)
+}
+
 // enqueue places env on this session's outbox (best-effort while the
 // outbox is live) and evaluates back-pressure. Delivery is skipped once
-// the outbox is closed; the event is still durable via the log.
+// the outbox is closed; the event is still durable via the log. sendMu
+// is held only to check the closed flag and register with sendWG; the
+// blocking channel send happens without the lock so a slow transport
+// does not serialize all event production (#83). closeOutbox always
+// cancels s.ctx first, so a parked send unblocks via the ctx.Done case
+// before the channel is closed.
 func (s *session) enqueue(env arcp.Envelope) {
 	s.sendMu.Lock()
-	closed := s.outboxClosed
-	if !closed {
-		select {
-		case s.outbox <- env:
-		case <-s.ctx.Done():
-		}
+	if s.outboxClosed {
+		s.sendMu.Unlock()
+		return
 	}
+	s.sendWG.Add(1)
 	s.sendMu.Unlock()
-	if !closed {
-		s.maybeEmitBackPressure(env.JobID, env.EventSeq)
+	defer s.sendWG.Done()
+	select {
+	case s.outbox <- env:
+	case <-s.ctx.Done():
 	}
+	s.maybeEmitBackPressure(env.JobID, env.EventSeq)
 }
 
 // replayBuffered re-delivers persisted events with EventSeq > fromSeq to
@@ -287,16 +303,7 @@ func (s *session) replayBuffered(fromSeq uint64) {
 	for _, e := range entries {
 		env := e.Envelope
 		env.SessionID = s.id
-		s.sendMu.Lock()
-		if !s.outboxClosed {
-			select {
-			case s.outbox <- env:
-			case <-s.ctx.Done():
-				s.sendMu.Unlock()
-				return
-			}
-		}
-		s.sendMu.Unlock()
+		s.enqueue(env)
 	}
 }
 
@@ -321,11 +328,16 @@ func (s *session) persistOutbound(env arcp.Envelope) {
 
 func (s *session) closeOutbox() {
 	s.sendMu.Lock()
-	defer s.sendMu.Unlock()
 	if s.outboxClosed {
+		s.sendMu.Unlock()
 		return
 	}
 	s.outboxClosed = true
+	s.sendMu.Unlock()
+	// Wait for in-flight enqueues to drain (they unblock via s.ctx.Done,
+	// which the caller cancels before closeOutbox) before closing the
+	// channel so no send races a close (#83).
+	s.sendWG.Wait()
 	close(s.outbox)
 }
 
@@ -407,8 +419,24 @@ func (s *session) maybeEmitBackPressure(jobID string, seq uint64) {
 		return
 	}
 	env.JobID = jobID
+	env.SessionID = s.id
 	env.EventSeq = s.nextSeq()
-	s.send(env)
+	// Persist then enqueue directly with a NON-blocking send rather than
+	// recursing through send/enqueue (which would re-enter this function
+	// and could block on a saturated outbox). Dropping the back_pressure
+	// event under saturation is acceptable; it re-arms on the next ack
+	// that drops the lag below the threshold (#75).
+	s.persistOutbound(env)
+	s.sendMu.Lock()
+	if !s.outboxClosed {
+		select {
+		case s.outbox <- env:
+		default:
+			// Outbox saturated; re-arm so the breach can fire later.
+			s.backPressureArmed.Store(true)
+		}
+	}
+	s.sendMu.Unlock()
 }
 
 func isCredentialRotation(env arcp.Envelope) bool {
@@ -463,6 +491,15 @@ func (s *session) run(ctx context.Context) error {
 	if s.hasFeature("heartbeat") && s.srv.opts.HeartbeatInterval > 0 {
 		watchdog = s.srv.opts.Clock.AfterFunc(2*s.srv.opts.HeartbeatInterval, func() {
 			s.heartbeatLost.Store(true)
+			// Tell the client why the connection is dropping (#87).
+			if env, err := arcp.NewEnvelope(messages.TypeSessionError, &messages.SessionError{
+				Code:      arcp.CodeHeartbeatLost,
+				Message:   "heartbeat lost: no inbound traffic within two intervals",
+				Retryable: true,
+			}); err == nil {
+				env.SessionID = s.id
+				_ = s.transport.Send(s.ctx, env)
+			}
 			s.cancel()
 		})
 		defer watchdog.Stop()
@@ -593,7 +630,10 @@ func (s *session) handleAck(env arcp.Envelope) error {
 	// Re-arm back_pressure once the client has caught back up below
 	// the threshold; the next breach will fire a fresh status event.
 	if threshold := s.srv.opts.AckLagThreshold; threshold > 0 {
-		if s.currentSeq()-high < threshold {
+		// Guard the unsigned subtraction: an ack whose LastProcessedSeq
+		// exceeds currentSeq (e.g. after resume replay) would otherwise
+		// underflow to a huge gap and mis-arm back_pressure (#70).
+		if cur := s.currentSeq(); cur <= high || cur-high < threshold {
 			s.backPressureArmed.Store(true)
 		}
 	}
@@ -783,7 +823,11 @@ func leaseConstraintsFromState(t *time.Time) *messages.LeaseConstraints {
 
 func (s *session) handleJobCancel(env arcp.Envelope) error {
 	var req messages.JobCancel
-	_ = env.DecodePayload(&req)
+	if err := env.DecodePayload(&req); err != nil {
+		// A malformed cancel must be rejected, not coerced into a
+		// zero-reason cancel (#74).
+		return s.sendErrorFor(env, arcp.CodeInvalidRequest, err.Error())
+	}
 	job := s.srv.lookupJob(env.JobID)
 	if job == nil {
 		return s.sendErrorFor(env, arcp.CodeJobNotFound, "job "+env.JobID+" not found")
@@ -850,11 +894,14 @@ func (s *session) handleJobSubscribe(ctx context.Context, env arcp.Envelope) err
 	s.send(out)
 	if req.History {
 		// Replay buffered events under the subscriber's seq space.
+		// Enqueue directly (not via send) so the replay does not
+		// re-persist duplicate log entries differing only by seq (#77).
 		entries, _ := s.srv.log.SinceJob(job.id, req.FromEventSeq)
 		for _, e := range entries {
 			replay := e.Envelope
+			replay.SessionID = s.id
 			replay.EventSeq = s.nextSeq()
-			s.send(replay)
+			s.enqueue(replay)
 		}
 	}
 	return nil
@@ -878,6 +925,3 @@ func (s *session) handleJobUnsubscribe(env arcp.Envelope) error {
 	}
 	return nil
 }
-
-// unused — silences linter on json import in some builds
-var _ = json.RawMessage(nil)

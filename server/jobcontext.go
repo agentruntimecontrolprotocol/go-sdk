@@ -49,10 +49,10 @@ func (jc *JobContext) Budget() map[arcp.Currency]float64 {
 	return jc.job.lease.Budget()
 }
 
-// ValidateLeaseOp checks that (cap, target) is permitted under the
-// lease at the current clock time.
-func (jc *JobContext) ValidateLeaseOp(cap arcp.Capability, target string) error {
-	return jc.job.lease.ValidateOp(jc.job.session.srv.opts.Clock.Now(), cap, target)
+// ValidateLeaseOp checks that (capability, target) is permitted under
+// the lease at the current clock time.
+func (jc *JobContext) ValidateLeaseOp(capability arcp.Capability, target string) error {
+	return jc.job.lease.ValidateOp(jc.job.session.srv.opts.Clock.Now(), capability, target)
 }
 
 // ReserveBudget atomically validates the lease op and reserves the
@@ -62,14 +62,20 @@ func (jc *JobContext) ValidateLeaseOp(cap arcp.Capability, target string) error 
 // debit has applied. The remaining balance for debit.Currency is
 // returned on success; on over-budget the counter is unchanged and
 // ErrBudgetExhausted is returned.
-func (jc *JobContext) ReserveBudget(cap arcp.Capability, target string, debit arcp.BudgetAmount) (float64, error) {
-	return jc.job.lease.ValidateAndDebit(jc.job.session.srv.opts.Clock.Now(), cap, target, debit)
+func (jc *JobContext) ReserveBudget(capability arcp.Capability, target string, debit arcp.BudgetAmount) (float64, error) {
+	return jc.job.lease.ValidateAndDebit(jc.job.session.srv.opts.Clock.Now(), capability, target, debit)
 }
 
-// Log emits a "log" job event.
+// Log emits a "log" job event. Any attrs are carried in the event
+// body's fields map (#71).
 func (jc *JobContext) Log(level slog.Level, msg string, attrs ...slog.Attr) {
 	body := messages.LogBody{Level: level.String(), Message: msg}
-	_ = attrs
+	if len(attrs) > 0 {
+		body.Fields = make(map[string]any, len(attrs))
+		for _, a := range attrs {
+			body.Fields[a.Key] = a.Value.Any()
+		}
+	}
 	jc.emitEvent(messages.KindLog, body)
 }
 
@@ -79,10 +85,16 @@ func (jc *JobContext) Thought(text string) {
 }
 
 // ToolCall emits a "tool_call" event and returns the generated call_id
-// the agent should reuse in the matching ToolResult / ToolError.
+// the agent should reuse in the matching ToolResult / ToolError. If args
+// cannot be marshalled, the failure is logged and a structured error
+// placeholder is emitted instead of a malformed event (#72).
 func (jc *JobContext) ToolCall(tool string, args any) string {
-	raw, _ := json.Marshal(args)
 	callID := arcp.NewCallID()
+	raw, err := json.Marshal(args)
+	if err != nil {
+		jc.job.session.srv.opts.Logger.Error("ToolCall args marshal failed", "tool", tool, "call_id", callID, "err", err)
+		raw = json.RawMessage(`{"error":"args not serializable"}`)
+	}
 	jc.emitEvent(messages.KindToolCall, messages.ToolCallBody{
 		Tool:   tool,
 		Args:   raw,
@@ -91,9 +103,23 @@ func (jc *JobContext) ToolCall(tool string, args any) string {
 	return callID
 }
 
-// ToolResult emits a successful "tool_result" event.
+// ToolResult emits a successful "tool_result" event. If result cannot be
+// marshalled, a tool_result carrying an INTERNAL_ERROR is emitted (and
+// the failure logged) instead of a malformed event (#72).
 func (jc *JobContext) ToolResult(callID string, result any) {
-	raw, _ := json.Marshal(result)
+	raw, err := json.Marshal(result)
+	if err != nil {
+		jc.job.session.srv.opts.Logger.Error("ToolResult marshal failed", "call_id", callID, "err", err)
+		jc.emitEvent(messages.KindToolResult, messages.ToolResultBody{
+			CallID: callID,
+			Error: &messages.ToolError{
+				Code:      arcp.CodeInternalError,
+				Message:   "tool result not serializable",
+				Retryable: false,
+			},
+		})
+		return
+	}
 	jc.emitEvent(messages.KindToolResult, messages.ToolResultBody{
 		CallID: callID,
 		Result: raw,
@@ -152,7 +178,12 @@ func (jc *JobContext) RotateCredential(id, newValue string) error {
 	env.JobID = jc.job.id
 	env.TraceID = jc.job.traceID
 	env.EventSeq = jc.job.session.nextSeq()
-	jc.job.session.send(env)
+	jc.job.recordSeq(env.EventSeq)
+	// Deliver the rotation (which carries the new secret value) over an
+	// ephemeral path that never persists to the event log, so the secret
+	// cannot be replayed even if the persistence filter ever drifts
+	// (#73). It is also not fanned out to subscribers.
+	jc.job.session.sendEphemeral(env)
 	// §9.8.2: revoke only the PRIOR value; the credential id stays live
 	// with newValue and is revoked once at terminal cleanup.
 	jc.job.revokePriorCredentialValue(id, prior)
@@ -183,18 +214,22 @@ func (jc *JobContext) Metric(name string, value float64, unit string, dims map[s
 }
 
 func (jc *JobContext) maybeEmitRemaining(cur arcp.Currency, remaining float64) {
+	initial := jc.job.lease.Initial()[cur]
+	// Hold budgetMu across the read, threshold decision, and write so
+	// two concurrent Metric calls cannot both pass the threshold and
+	// emit duplicate cost.budget.remaining events (#89).
 	jc.budgetMu.Lock()
 	if jc.lastRemainEmit == nil {
 		jc.lastRemainEmit = map[arcp.Currency]float64{}
 	}
 	last, ok := jc.lastRemainEmit[cur]
-	jc.budgetMu.Unlock()
-	initial := jc.job.lease.Initial()[cur]
 	delta := math.Abs(last - remaining)
-	if !ok || initial == 0 || delta/initial >= 0.05 || remaining <= 0 {
-		jc.budgetMu.Lock()
+	shouldEmit := !ok || initial == 0 || delta/initial >= 0.05 || remaining <= 0
+	if shouldEmit {
 		jc.lastRemainEmit[cur] = remaining
-		jc.budgetMu.Unlock()
+	}
+	jc.budgetMu.Unlock()
+	if shouldEmit {
 		jc.emitEvent(messages.KindMetric, messages.MetricBody{
 			Name:  "cost.budget.remaining",
 			Value: remaining,
@@ -270,6 +305,7 @@ func (jc *JobContext) emitEvent(kind string, body any) {
 	env.JobID = jc.job.id
 	env.TraceID = jc.job.traceID
 	env.EventSeq = jc.job.session.nextSeq()
+	jc.job.recordSeq(env.EventSeq)
 	jc.job.session.send(env)
 	jc.job.session.srv.fanoutEvent(jc.job.ctx, jc.job.id, env)
 }

@@ -5,9 +5,13 @@ package nethttp
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/agentruntimecontrolprotocol/go-sdk/server"
@@ -18,9 +22,13 @@ import (
 // Options configures the HTTP handler.
 type Options struct {
 	// Path is the request path served by the handler. Defaults to
-	// "/arcp"; the handler returns 404 for any other request path
-	// when invoked through a parent mux that does not strip the
-	// prefix.
+	// "/arcp"; the handler returns 404 for any other request path.
+	//
+	// NOTE: this is an exact match against r.URL.Path. If you mount the
+	// handler under a sub-path-stripping mux (e.g. http.StripPrefix or a
+	// chi subrouter that rewrites the path), the inner path will not
+	// equal opts.Path and every request will 404. In that case set Path
+	// to "" to disable the check and rely on your router for dispatch.
 	Path string
 	// AllowedHosts is the list of acceptable HTTP Host headers. The
 	// SDK default is the loopback set per spec §14 DNS-rebind
@@ -35,6 +43,9 @@ type Options struct {
 	Origins []string
 	// PingInterval drives WS-layer keepalives. Zero disables.
 	PingInterval time.Duration
+	// Logger receives handler diagnostics, including srv.Accept errors.
+	// nil uses a discard logger (no ambient output).
+	Logger *slog.Logger
 }
 
 func (o Options) withDefaults() Options {
@@ -42,10 +53,13 @@ func (o Options) withDefaults() Options {
 		o.Path = "/arcp"
 	}
 	if len(o.AllowedHosts) == 0 {
-		o.AllowedHosts = []string{"localhost", "127.0.0.1", "[::1]"}
+		o.AllowedHosts = []string{"localhost", "127.0.0.1", "::1"}
 	}
 	if o.ReadLimit == 0 {
 		o.ReadLimit = 1 << 20
+	}
+	if o.Logger == nil {
+		o.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	return o
 }
@@ -53,11 +67,12 @@ func (o Options) withDefaults() Options {
 // Handler is the http.Handler returned by NewHandler. It is also
 // callable as a graceful shutter via Shutdown.
 type Handler struct {
-	opts   Options
-	srv    *server.Server
-	mu     sync.Mutex
-	active map[uint64]*websocket.Conn
-	nextID uint64
+	opts    Options
+	srv     *server.Server
+	mu      sync.Mutex
+	active  map[uint64]*websocket.Conn
+	nextID  uint64
+	closing atomic.Bool
 	// drained is signalled (closed and reopened) every time a
 	// connection is removed from active so Shutdown can wake without
 	// polling. Set by removeConn; replaced under mu.
@@ -93,6 +108,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if h.closing.Load() {
+		// Server is shutting down: refuse new connections so Shutdown
+		// can drain deterministically (#124).
+		http.Error(w, "server shutting down", http.StatusServiceUnavailable)
+		return
+	}
 	if h.opts.Path != "" && r.URL.Path != h.opts.Path {
 		http.NotFound(w, r)
 		return
@@ -121,7 +142,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer cancelPing()
 		go pingLoop(pingCtx, conn, h.opts.PingInterval)
 	}
-	_ = h.srv.Accept(r.Context(), t)
+	if err := h.srv.Accept(r.Context(), t); err != nil {
+		h.opts.Logger.Warn("arcp session ended with error", "conn_id", id, "err", err)
+	}
 }
 
 // pingLoop sends a WebSocket-layer Ping at the configured interval
@@ -152,6 +175,8 @@ func pingLoop(ctx context.Context, conn *websocket.Conn, interval time.Duration)
 // and ctx.Err when the context expires. Calling Shutdown on a handler
 // with no active connections returns immediately with nil.
 func (h *Handler) Shutdown(ctx context.Context) error {
+	// Refuse new connections so active cannot grow while we drain (#124).
+	h.closing.Store(true)
 	h.mu.Lock()
 	conns := make([]*websocket.Conn, 0, len(h.active))
 	for _, c := range h.active {
@@ -183,8 +208,12 @@ func hostAllowed(hostHeader string, allowed []string) bool {
 	if h, _, err := net.SplitHostPort(hostHeader); err == nil {
 		host = h
 	}
+	// Strip surrounding brackets so a bracketed IPv6 host without a port
+	// (e.g. "[::1]") compares equal to the unbracketed allowlist entry
+	// "::1" (#123).
+	host = strings.Trim(host, "[]")
 	for _, a := range allowed {
-		if a == host {
+		if strings.Trim(a, "[]") == host {
 			return true
 		}
 	}

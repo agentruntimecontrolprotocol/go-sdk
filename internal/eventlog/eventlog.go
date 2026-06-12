@@ -37,10 +37,13 @@ type Memory struct {
 	mu     sync.Mutex
 	bySess map[string][]Entry
 	max    int
+	now    func() time.Time
 }
 
 // NewMemory returns a Memory log retaining at most maxPerSession
-// entries per session (the oldest are dropped past the limit).
+// entries per session (the oldest are dropped past the limit). The
+// default-timestamp clock is wall time; inject a deterministic source
+// with SetClock.
 func NewMemory(maxPerSession int) *Memory {
 	if maxPerSession <= 0 {
 		maxPerSession = 10_000
@@ -48,7 +51,20 @@ func NewMemory(maxPerSession int) *Memory {
 	return &Memory{
 		bySess: map[string][]Entry{},
 		max:    maxPerSession,
+		now:    time.Now,
 	}
+}
+
+// SetClock overrides the source used to fill a zero Entry.StoredAt so
+// library callers can avoid ambient time.Now and make retention tests
+// deterministic (#62). A nil argument is ignored.
+func (m *Memory) SetClock(now func() time.Time) {
+	if now == nil {
+		return
+	}
+	m.mu.Lock()
+	m.now = now
+	m.mu.Unlock()
 }
 
 // Append stores e indexed by session id.
@@ -56,7 +72,7 @@ func (m *Memory) Append(e Entry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if e.StoredAt.IsZero() {
-		e.StoredAt = time.Now()
+		e.StoredAt = m.now()
 	}
 	entries := m.bySess[e.SessionID]
 	entries = append(entries, e)

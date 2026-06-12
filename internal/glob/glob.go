@@ -122,8 +122,9 @@ func matchSegments(p, s []string) bool {
 	}
 }
 
-// literalSegmentMatch supports a single '*' wildcard within a segment,
-// matching any non-empty sequence of characters not containing '/'.
+// literalSegmentMatch supports '*' wildcards within a single segment.
+// Each '*' matches any (possibly empty) sequence of characters that does
+// not contain '/', so "foo*" matches both "foobar" and "foo".
 func literalSegmentMatch(pat, s string) bool {
 	if pat == s {
 		return true
@@ -137,12 +138,11 @@ func literalSegmentMatch(pat, s string) bool {
 		return false
 	}
 	s = s[len(parts[0]):]
-	for i, part := range parts[1 : len(parts)-1] {
+	for _, part := range parts[1 : len(parts)-1] {
 		idx := strings.Index(s, part)
 		if idx < 0 {
 			return false
 		}
-		_ = i
 		s = s[idx+len(part):]
 	}
 	return strings.HasSuffix(s, parts[len(parts)-1])

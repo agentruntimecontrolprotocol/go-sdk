@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"sync/atomic"
 
 	arcp "github.com/agentruntimecontrolprotocol/go-sdk"
 	"github.com/coder/websocket"
@@ -53,12 +54,12 @@ func NewWebSocket(conn *websocket.Conn) Transport {
 type wsTransport struct {
 	conn   *websocket.Conn
 	writeM sync.Mutex
-	closed atomicBool
+	closed atomic.Bool
 }
 
 // Send marshals env and writes one text frame.
 func (t *wsTransport) Send(ctx context.Context, env arcp.Envelope) error {
-	if t.closed.Get() {
+	if t.closed.Load() {
 		return ErrClosed
 	}
 	if env.ARCP == "" {
@@ -81,15 +82,20 @@ func (t *wsTransport) Send(ctx context.Context, env arcp.Envelope) error {
 
 // Recv reads one frame and unmarshals it into an envelope.
 func (t *wsTransport) Recv(ctx context.Context) (arcp.Envelope, error) {
-	if t.closed.Get() {
+	if t.closed.Load() {
 		return arcp.Envelope{}, ErrClosed
 	}
-	_, body, err := t.conn.Read(ctx)
+	typ, body, err := t.conn.Read(ctx)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return arcp.Envelope{}, ctx.Err()
 		}
 		return arcp.Envelope{}, err
+	}
+	// ARCP frames are JSON text; reject binary frames as a framing-level
+	// protocol violation instead of letting them fail at JSON parse.
+	if typ != websocket.MessageText {
+		return arcp.Envelope{}, arcp.ErrInvalidRequest.WithMessage("expected text frame, got binary")
 	}
 	var env arcp.Envelope
 	if err := json.Unmarshal(body, &env); err != nil {
@@ -100,30 +106,8 @@ func (t *wsTransport) Recv(ctx context.Context) (arcp.Envelope, error) {
 
 // Close gracefully shuts the conn down with status 1000 / "bye".
 func (t *wsTransport) Close() error {
-	if !t.closed.Set(true) {
+	if !t.closed.CompareAndSwap(false, true) {
 		return nil
 	}
 	return t.conn.Close(websocket.StatusNormalClosure, "bye")
-}
-
-type atomicBool struct {
-	mu sync.Mutex
-	v  bool
-}
-
-func (a *atomicBool) Get() bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.v
-}
-
-// Set sets the boolean to v and returns true if the value changed.
-func (a *atomicBool) Set(v bool) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.v == v {
-		return false
-	}
-	a.v = v
-	return true
 }

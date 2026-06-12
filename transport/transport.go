@@ -26,8 +26,9 @@ type Transport interface {
 	// transport closes.
 	Recv(ctx context.Context) (arcp.Envelope, error)
 	// Close terminates the transport. Subsequent Send calls return
-	// ErrClosed; pending Recv calls unblock with io.EOF or an
-	// equivalent wrapped error. Safe to call more than once.
+	// ErrClosed; pending Recv calls unblock with ErrClosed (or a
+	// transport-specific close error, e.g. a *websocket.CloseError).
+	// Safe to call more than once.
 	Close() error
 }
 

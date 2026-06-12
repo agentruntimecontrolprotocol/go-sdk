@@ -14,6 +14,38 @@ import (
 	arcp "github.com/agentruntimecontrolprotocol/go-sdk"
 )
 
+// TestStdioLargeLineRoundTrips covers #122: an NDJSON line larger than
+// the default 64KiB scanner token (but within the 1MiB limit) must
+// round-trip instead of killing the transport with ErrTooLong.
+func TestStdioLargeLineRoundTrips(t *testing.T) {
+	big := make([]byte, 512*1024)
+	for i := range big {
+		big[i] = 'a' + byte(i%26)
+	}
+	env := arcp.Envelope{Type: "job.event", SessionID: "s", Payload: mustJSONString(string(big))}
+	line, err := json.Marshal(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line = append(line, '\n')
+	rt := NewStdioTransport(bytes.NewReader(line), io.Discard)
+	defer rt.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	got, err := rt.Recv(ctx)
+	if err != nil {
+		t.Fatalf("large line failed: %v", err)
+	}
+	if got.Type != "job.event" {
+		t.Fatalf("got type %q", got.Type)
+	}
+}
+
+func mustJSONString(s string) json.RawMessage {
+	b, _ := json.Marshal(s)
+	return b
+}
+
 // TestStdioRecvCancellationDoesNotLeak covers #54: many cancelled Recv
 // calls must not spawn per-call scanner goroutines and the transport
 // must still deliver a subsequent envelope normally.

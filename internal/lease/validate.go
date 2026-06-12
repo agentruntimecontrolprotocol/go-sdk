@@ -96,14 +96,19 @@ func (s *State) HasBudget() bool {
 
 // ValidateOp checks that op (capability, target) is allowed under the
 // lease at time now. Returns nil on success or a structured arcp.Error.
-func (s *State) ValidateOp(now time.Time, cap arcp.Capability, target string) error {
+//
+// Budget gate: if the lease carries any budget counters, the operation
+// is rejected with BUDGET_EXHAUSTED when ANY currency counter is <= 0,
+// not only the currency relevant to this op. This matches §9.6 ("ops
+// MUST fail once any counter is <= 0"); see also ValidateAndDebit.
+func (s *State) ValidateOp(now time.Time, capability arcp.Capability, target string) error {
 	if s == nil {
 		return arcp.ErrPermissionDenied.WithMessage("no lease in scope")
 	}
 	if s.expiresAt != nil && !now.Before(*s.expiresAt) {
 		return arcp.ErrLeaseExpired.WithMessage("lease expired at " + s.expiresAt.Format(time.RFC3339))
 	}
-	if !s.matches(cap, target) {
+	if !s.matches(capability, target) {
 		return arcp.ErrPermissionDenied.WithMessage("operation not permitted by lease")
 	}
 	s.mu.Lock()
@@ -130,7 +135,7 @@ func (s *State) ValidateOp(now time.Time, cap arcp.Capability, target string) er
 // avoid the time-of-check / time-of-use window where many goroutines
 // can pass validation before the first debit reduces the shared
 // counter.
-func (s *State) ValidateAndDebit(now time.Time, cap arcp.Capability, target string, debit arcp.BudgetAmount) (float64, error) {
+func (s *State) ValidateAndDebit(now time.Time, capability arcp.Capability, target string, debit arcp.BudgetAmount) (float64, error) {
 	if s == nil {
 		return 0, arcp.ErrPermissionDenied.WithMessage("no lease in scope")
 	}
@@ -140,7 +145,7 @@ func (s *State) ValidateAndDebit(now time.Time, cap arcp.Capability, target stri
 	if s.expiresAt != nil && !now.Before(*s.expiresAt) {
 		return 0, arcp.ErrLeaseExpired.WithMessage("lease expired at " + s.expiresAt.Format(time.RFC3339))
 	}
-	if !s.matches(cap, target) {
+	if !s.matches(capability, target) {
 		return 0, arcp.ErrPermissionDenied.WithMessage("operation not permitted by lease")
 	}
 	s.mu.Lock()

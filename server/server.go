@@ -4,7 +4,10 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -179,14 +182,20 @@ func New(opts Options) *Server {
 	o := opts.withDefaults()
 	lifeCtx, lifeCancel := context.WithCancel(context.Background())
 	const idTTL = 24 * time.Hour
+	// Inject the configured clock so the in-memory stores fill default
+	// timestamps deterministically instead of via ambient time.Now (#62).
+	idStore := idstore.NewMemory(idTTL)
+	idStore.SetClock(o.Clock.Now)
+	log := eventlog.NewMemory(o.EventLogSize)
+	log.SetClock(o.Clock.Now)
 	s := &Server{
 		opts:         o,
 		agents:       map[string]*agentEntry{},
 		jobs:         map[string]*Job{},
 		subs:         map[string][]*subscription{},
-		idStore:      idstore.NewMemory(idTTL),
+		idStore:      idStore,
 		idTTL:        idTTL,
-		log:          eventlog.NewMemory(10_000),
+		log:          log,
 		resumes:      map[string]*resumeEntry{},
 		lifeCtx:      lifeCtx,
 		lifeCancel:   lifeCancel,
@@ -431,15 +440,60 @@ func (s *Server) resolveAgent(ref messages.AgentRef) (AgentFunc, string, error) 
 		return e.bare, ref.Name, nil
 	}
 	if len(e.versions) > 0 {
-		var chosen string
-		for k := range e.versions {
-			if chosen == "" || k < chosen {
-				chosen = k
-			}
-		}
+		// No explicit version, no default, no bare handler: pick the
+		// highest version by semver-style numeric ordering rather than a
+		// surprising lexical pick (e.g. "1.10.0" < "1.9.0"). Operators
+		// should still set a default for deterministic selection.
+		chosen := highestVersion(e.versions)
 		return e.versions[chosen], ref.Name + "@" + chosen, nil
 	}
 	return nil, "", arcp.ErrAgentNotAvailable.WithMessage("agent " + ref.Name + " has no registered handlers")
+}
+
+// highestVersion returns the highest version key by dot-separated
+// numeric (semver-style) comparison, falling back to lexical order for
+// non-numeric components.
+func highestVersion(versions map[string]AgentFunc) string {
+	var best string
+	for v := range versions {
+		if best == "" || compareVersions(v, best) > 0 {
+			best = v
+		}
+	}
+	return best
+}
+
+// compareVersions returns >0 if a is newer than b, <0 if older, 0 equal.
+func compareVersions(a, b string) int {
+	as := strings.Split(a, ".")
+	bs := strings.Split(b, ".")
+	for i := 0; i < len(as) || i < len(bs); i++ {
+		var av, bv string
+		if i < len(as) {
+			av = as[i]
+		}
+		if i < len(bs) {
+			bv = bs[i]
+		}
+		an, aerr := strconv.Atoi(av)
+		bn, berr := strconv.Atoi(bv)
+		if aerr == nil && berr == nil {
+			if an != bn {
+				if an > bn {
+					return 1
+				}
+				return -1
+			}
+			continue
+		}
+		if av != bv {
+			if av > bv {
+				return 1
+			}
+			return -1
+		}
+	}
+	return 0
 }
 
 // inventory snapshots the registered agent table for session.welcome.
@@ -448,7 +502,7 @@ func (s *Server) inventory() []messages.AgentEntry {
 	defer s.mu.RUnlock()
 	out := make([]messages.AgentEntry, 0, len(s.agents))
 	for _, e := range s.agents {
-		entry := messages.AgentEntry{Name: e.name, Default: e.defaultVer}
+		entry := messages.AgentEntry{Name: e.name, Default: e.defaultVer, Bare: e.bare != nil}
 		for v := range e.versions {
 			entry.Versions = append(entry.Versions, v)
 		}
@@ -480,15 +534,30 @@ func (s *Server) Accept(ctx context.Context, t transport.Transport) error {
 	runErr := sess.run(ctx)
 	if sess.gracefulBye.Load() {
 		s.dropResume(sess.id)
-	} else if sess.resumeToken != "" {
+	} else if sess.resumeToken != "" && !s.isClosed() {
+		// Don't stash a resume entry for a session that is ending only
+		// because the server is shutting down — it could never be
+		// claimed and would leak past Close (#86).
 		s.stashResume(sess, sess.resumeToken)
 	}
 	return runErr
 }
 
+// isClosed reports whether Server.Close has been initiated.
+func (s *Server) isClosed() bool {
+	select {
+	case <-s.closeCh:
+		return true
+	default:
+		return false
+	}
+}
+
 // ErrServerClosed is returned by Accept when Server.Close has already
-// fired.
-var ErrServerClosed = arcp.ErrInternalError.WithMessage("server closed")
+// fired. It is a normal lifecycle signal, not an internal error, so it
+// is a distinct sentinel callers can match with errors.Is to tell
+// shutdown apart from a genuine server fault.
+var ErrServerClosed = errors.New("arcp/server: server closed")
 
 // Close terminates all active sessions and active jobs. It is
 // idempotent: subsequent calls are no-ops and return nil.
@@ -522,6 +591,11 @@ func (s *Server) Close() error {
 		_ = sess.transport.Close()
 	}
 	<-s.sessionsDone
+	// All sessions have exited; drop any resume entries so none can be
+	// claimed by a subsequent handshake after Close returns (#86).
+	s.resumeMu.Lock()
+	s.resumes = map[string]*resumeEntry{}
+	s.resumeMu.Unlock()
 	return nil
 }
 
@@ -536,7 +610,7 @@ func (s *Server) features() []string {
 func (s *Server) filterFeatures(in []string) []string {
 	out := make([]string, 0, len(in))
 	for _, f := range in {
-		if (f == "provisioned_credentials" || f == "model.use") && s.opts.Provisioner == nil {
+		if arcp.RequiresProvisioner(f) && s.opts.Provisioner == nil {
 			continue
 		}
 		out = append(out, f)
@@ -594,15 +668,40 @@ func (s *Server) listJobs(principal string, filter messages.ListJobsFilter, limi
 		out = out[skipUntilCursor(out, cursor):]
 	}
 	if limit > 0 && len(out) > limit {
-		next := out[limit-1].JobID
+		next := encodeCursor(out[limit-1])
 		return out[:limit], next, nil
 	}
 	return out, "", nil
 }
 
+// encodeCursor builds a composite cursor from the sort key
+// (CreatedAt, JobID) so pagination is stable even when CreatedAt
+// collides across jobs (#85).
+func encodeCursor(info messages.JobInfo) string {
+	return strconv.FormatInt(info.CreatedAt.UnixNano(), 10) + "|" + info.JobID
+}
+
+// skipUntilCursor returns the index of the first item strictly after the
+// composite (CreatedAt, JobID) cursor, matching the list ordering.
 func skipUntilCursor(items []messages.JobInfo, cursor string) int {
+	sep := strings.IndexByte(cursor, '|')
+	if sep < 0 {
+		// Legacy job-id-only cursor: fall back to the old behavior.
+		for i, it := range items {
+			if it.JobID > cursor {
+				return i
+			}
+		}
+		return len(items)
+	}
+	ts, err := strconv.ParseInt(cursor[:sep], 10, 64)
+	if err != nil {
+		return 0
+	}
+	curID := cursor[sep+1:]
 	for i, it := range items {
-		if it.JobID > cursor {
+		itTS := it.CreatedAt.UnixNano()
+		if itTS > ts || (itTS == ts && it.JobID > curID) {
 			return i
 		}
 	}
@@ -625,10 +724,12 @@ func filterMatch(f messages.ListJobsFilter, info messages.JobInfo) bool {
 	if f.Agent != "" && info.Agent != f.Agent {
 		return false
 	}
-	if f.CreatedAfter != nil && !info.CreatedAt.After(*f.CreatedAfter) {
+	// Inclusive bounds: CreatedAfter means created_at >= bound and
+	// CreatedBefore means created_at <= bound (#84).
+	if f.CreatedAfter != nil && info.CreatedAt.Before(*f.CreatedAfter) {
 		return false
 	}
-	if f.CreatedBefore != nil && !info.CreatedAt.Before(*f.CreatedBefore) {
+	if f.CreatedBefore != nil && info.CreatedAt.After(*f.CreatedBefore) {
 		return false
 	}
 	return true

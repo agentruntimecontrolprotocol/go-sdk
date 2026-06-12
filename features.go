@@ -26,6 +26,22 @@ func IntersectFeatures(a, b []string) []string {
 	return out
 }
 
+// provisionerGatedFeatures are the negotiable features that require a
+// credential provisioner to be configured before they may be advertised.
+var provisionerGatedFeatures = map[string]struct{}{
+	"provisioned_credentials": {},
+	"model.use":               {},
+}
+
+// RequiresProvisioner reports whether feature name may only be advertised
+// when a credential provisioner is configured. Keep the gating here,
+// alongside the feature list, so adding a new provisioner-gated feature
+// does not require editing server-side filtering logic.
+func RequiresProvisioner(name string) bool {
+	_, ok := provisionerGatedFeatures[name]
+	return ok
+}
+
 // HasFeature reports whether name appears in features.
 func HasFeature(features []string, name string) bool {
 	for _, f := range features {

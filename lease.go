@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/agentruntimecontrolprotocol/go-sdk/internal/glob"
 )
 
 // Capability is the lease namespace identifier. The constants below
@@ -48,13 +50,15 @@ func (l Lease) Clone() Lease {
 type Currency string
 
 // BudgetAmount is one entry in a cost.budget pattern list, of the form
-// "USD:5.00".
+// "CUR:amount" (for example "USD:5").
 type BudgetAmount struct {
 	Currency Currency
 	Value    float64
 }
 
-// String returns the canonical "CUR:value" representation.
+// String returns the canonical "CUR:value" representation. The value
+// uses the shortest decimal that round-trips, so BudgetAmount{"USD", 5}
+// renders as "USD:5" (not "USD:5.00") and {"USD", 5.5} as "USD:5.5".
 func (b BudgetAmount) String() string {
 	return fmt.Sprintf("%s:%s", b.Currency, strconv.FormatFloat(b.Value, 'f', -1, 64))
 }
@@ -91,9 +95,9 @@ func isCurrency(s string) bool {
 	}
 	for _, r := range s {
 		if r < 'A' || r > 'Z' {
-			// Vendor-defined currencies may use any printable; we
-			// accept ISO-4217-shaped uppercase by default and let
-			// the runtime widen via deployment policy.
+			// Vendor-defined currencies may use any printable form.
+			// ISO-4217-shaped uppercase is accepted by default;
+			// deployments may widen this via their own policy.
 			return allUppercaseLetters(s) || allLowercaseLetters(s)
 		}
 	}
@@ -158,13 +162,15 @@ func (l *Lease) UnmarshalJSON(data []byte) error {
 // optional. Passing nil for either skips the expiry comparison.
 //
 // Use this when implementing custom delegation flows on top of the
-// SDK. Sub-job submission is not yet a first-class client API; callers
-// that want to issue a child job over the wire today must do so by
-// dialing a second session and submitting the child lease themselves
-// after verifying it with IsLeaseSubset.
+// SDK. Sub-job submission is not a first-class client API: callers that
+// want to issue a child job over the wire must dial a second session and
+// submit the child lease after verifying it with IsLeaseSubset.
+//
+// Pattern inclusion is decided by internal/glob.Covers, the single
+// canonical glob implementation shared with the runtime's lease checks.
 func IsLeaseSubset(parent, child Lease, parentRemaining map[Currency]float64, parentExpiry, childExpiry *time.Time) error {
-	for cap, patterns := range child {
-		if cap == CapCostBudget {
+	for ns, patterns := range child {
+		if ns == CapCostBudget {
 			for _, pat := range patterns {
 				amt, err := ParseBudgetAmount(pat)
 				if err != nil {
@@ -180,20 +186,20 @@ func IsLeaseSubset(parent, child Lease, parentRemaining map[Currency]float64, pa
 			}
 			continue
 		}
-		parentPatterns, ok := parent[cap]
+		parentPatterns, ok := parent[ns]
 		if !ok {
-			return ErrLeaseSubsetViolation.WithMessage("child lease has capability " + string(cap) + " missing from parent")
+			return ErrLeaseSubsetViolation.WithMessage("child lease has capability " + string(ns) + " missing from parent")
 		}
 		for _, cp := range patterns {
 			matched := false
 			for _, p := range parentPatterns {
-				if globCovers(p, cp) {
+				if glob.Covers(p, cp) {
 					matched = true
 					break
 				}
 			}
 			if !matched {
-				return ErrLeaseSubsetViolation.WithMessage("child pattern " + cp + " not covered by parent " + string(cap))
+				return ErrLeaseSubsetViolation.WithMessage("child pattern " + cp + " not covered by parent " + string(ns))
 			}
 		}
 	}
@@ -201,133 +207,4 @@ func IsLeaseSubset(parent, child Lease, parentRemaining map[Currency]float64, pa
 		return ErrLeaseSubsetViolation.WithMessage("child expires_at exceeds parent")
 	}
 	return nil
-}
-
-// globMatch implements the lease pattern matcher. * matches any
-// single path segment; ** matches zero or more segments. Within a
-// segment a single '*' wildcard matches any non-empty sequence of
-// characters not containing '/'.
-func globMatch(pattern, s string) bool {
-	var split = func(in string) []string {
-		if in == "" {
-			return nil
-		}
-		return strings.Split(in, "/")
-	}
-	return globMatchSegments(split(pattern), split(s))
-}
-
-func globMatchSegments(p, s []string) bool {
-	if len(p) == 0 {
-		return len(s) == 0
-	}
-	head := p[0]
-	rest := p[1:]
-	switch head {
-	case "**":
-		if len(rest) == 0 {
-			return true
-		}
-		for i := 0; i <= len(s); i++ {
-			if globMatchSegments(rest, s[i:]) {
-				return true
-			}
-		}
-		return false
-	case "*":
-		if len(s) == 0 {
-			return false
-		}
-		return globMatchSegments(rest, s[1:])
-	default:
-		if len(s) == 0 {
-			return false
-		}
-		if !globLiteralSegmentMatch(head, s[0]) {
-			return false
-		}
-		return globMatchSegments(rest, s[1:])
-	}
-}
-
-// globCovers reports whether every concrete target matched by the
-// child pattern is also matched by the parent pattern. Unlike
-// globMatch (pattern vs concrete string), it decides pattern-inclusion
-// so a child whose wildcards widen authority beyond the parent is
-// rejected per the §9.4/§10 delegation rules. It is sound (never
-// accepts a widening child) and conservative.
-func globCovers(parent, child string) bool {
-	var split = func(in string) []string {
-		if in == "" {
-			return nil
-		}
-		return strings.Split(in, "/")
-	}
-	return globCoversSegments(split(parent), split(child))
-}
-
-func globCoversSegments(p, c []string) bool {
-	if len(p) == 0 {
-		return len(c) == 0
-	}
-	head := p[0]
-	rest := p[1:]
-	switch head {
-	case "**":
-		for i := 0; i <= len(c); i++ {
-			if globCoversSegments(rest, c[i:]) {
-				return true
-			}
-		}
-		return false
-	case "*":
-		if len(c) == 0 || c[0] == "**" {
-			return false
-		}
-		return globCoversSegments(rest, c[1:])
-	default:
-		if len(c) == 0 {
-			return false
-		}
-		ch := c[0]
-		if ch == "*" || ch == "**" {
-			return false
-		}
-		if !globSegmentCovers(head, ch) {
-			return false
-		}
-		return globCoversSegments(rest, c[1:])
-	}
-}
-
-func globSegmentCovers(parent, child string) bool {
-	if parent == child {
-		return true
-	}
-	if strings.Contains(child, "*") {
-		return false
-	}
-	return globLiteralSegmentMatch(parent, child)
-}
-
-func globLiteralSegmentMatch(pat, s string) bool {
-	if pat == s {
-		return true
-	}
-	if !strings.Contains(pat, "*") {
-		return false
-	}
-	parts := strings.Split(pat, "*")
-	if !strings.HasPrefix(s, parts[0]) {
-		return false
-	}
-	s = s[len(parts[0]):]
-	for _, part := range parts[1 : len(parts)-1] {
-		idx := strings.Index(s, part)
-		if idx < 0 {
-			return false
-		}
-		s = s[idx+len(part):]
-	}
-	return strings.HasSuffix(s, parts[len(parts)-1])
 }

@@ -310,13 +310,14 @@ func TestAgentResolverFallback(t *testing.T) {
 	srv.RegisterAgentVersion("solver", "2.0.0", func(ctx context.Context, _ json.RawMessage, jc *JobContext) (any, error) {
 		return nil, nil
 	})
-	// Bare ref with no default: pick lowest version lexicographically.
+	// Bare ref with no default: pick the highest version by semver-style
+	// numeric ordering (#94).
 	_, canonical, err := srv.resolveAgent(messages.AgentRef{Name: "solver"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if canonical != "solver@1.0.0" {
-		t.Fatalf("canonical = %s, want solver@1.0.0", canonical)
+	if canonical != "solver@2.0.0" {
+		t.Fatalf("canonical = %s, want solver@2.0.0", canonical)
 	}
 	// Set default and retry.
 	if err := srv.SetDefaultAgentVersion("solver", "2.0.0"); err != nil {

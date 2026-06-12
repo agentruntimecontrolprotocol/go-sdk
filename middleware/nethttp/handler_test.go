@@ -182,6 +182,11 @@ func TestHostAllowed(t *testing.T) {
 		{"localhost:8080", []string{"localhost"}, true},
 		{"example.com", []string{"localhost"}, false},
 		{"[::1]", []string{"[::1]"}, true},
+		// #123: bracketed IPv6 with a port must match the default
+		// unbracketed "::1" allowlist entry.
+		{"[::1]:8080", []string{"localhost", "127.0.0.1", "::1"}, true},
+		{"[::1]", []string{"localhost", "127.0.0.1", "::1"}, true},
+		{"::1", []string{"::1"}, true},
 	}
 	for _, tc := range cases {
 		if got := hostAllowed(tc.host, tc.allowed); got != tc.want {

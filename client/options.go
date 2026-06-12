@@ -42,6 +42,15 @@ type Options struct {
 	// with seq greater than LastEventSeq before live traffic resumes.
 	// The token is single-use; the next welcome carries a fresh one.
 	Resume *messages.ResumeRequest
+	// DetectSeqGaps enables §8.3 gap detection: if an incoming
+	// event_seq skips the next expected value, the client treats the
+	// session as broken, closes it, and fails outstanding handles with
+	// an error suitable for triggering a Resume. It is opt-in (default
+	// off) because the runtime favors lock-free event delivery over
+	// strict cross-job ordering, so concurrent multi-job emission can
+	// legitimately deliver event_seq values slightly out of order;
+	// enable this only when the runtime guarantees in-order delivery.
+	DetectSeqGaps bool
 	// EventDeliveryTimeout bounds how long the dispatcher will block
 	// trying to deliver a single envelope to a slow JobHandle or
 	// Subscription consumer before closing it with an overflow error.

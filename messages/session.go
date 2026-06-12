@@ -32,6 +32,11 @@ type AgentEntry struct {
 	Name     string   `json:"name"`
 	Versions []string `json:"versions,omitempty"`
 	Default  string   `json:"default,omitempty"`
+	// Bare reports whether the agent is callable by bare name (i.e.
+	// registered via RegisterAgent without a version). A bare-only agent
+	// otherwise appears with an empty Versions/Default and would look
+	// uncallable to introspecting clients.
+	Bare bool `json:"bare,omitempty"`
 }
 
 // HelloCapabilities is the capability advertisement sent in
@@ -152,7 +157,9 @@ type SessionListJobs struct {
 // ARCPType returns the wire-type string for SessionListJobs.
 func (*SessionListJobs) ARCPType() string { return TypeSessionListJobs }
 
-// ListJobsFilter narrows the result set of session.list_jobs.
+// ListJobsFilter narrows the result set of session.list_jobs. The
+// CreatedAfter/CreatedBefore bounds are inclusive: a job matches when
+// created_at >= CreatedAfter and created_at <= CreatedBefore.
 type ListJobsFilter struct {
 	Status        []string   `json:"status,omitempty"`
 	Agent         string     `json:"agent,omitempty"`

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	arcp "github.com/agentruntimecontrolprotocol/go-sdk"
@@ -44,6 +45,12 @@ type Job struct {
 
 	expiryTimer  clock.Timer
 	runtimeTimer clock.Timer
+
+	// lastEventSeq is the highest event_seq this job has emitted. It is
+	// reported as JobInfo.LastEventSeq (a per-job high-water mark) rather
+	// than reading the session-wide counter off a possibly-stale session
+	// pointer (#69).
+	lastEventSeq atomic.Uint64
 
 	// streamCount limits at most one StreamResult per job.
 	streamCount int
@@ -135,7 +142,12 @@ func (j *Job) status() string {
 
 func (j *Job) setStatus(s string) {
 	j.mu.Lock()
-	j.statusV = s
+	// Never overwrite a terminal status with a non-terminal one (#79):
+	// an already-expired lease can mark the job terminal before run()
+	// starts.
+	if !j.terminal {
+		j.statusV = s
+	}
 	j.mu.Unlock()
 }
 
@@ -158,7 +170,17 @@ func (j *Job) snapshot() messages.JobInfo {
 		Lease:        j.lease.Lease(),
 		CreatedAt:    j.createdAt,
 		TraceID:      j.traceID,
-		LastEventSeq: j.session.currentSeq(),
+		LastEventSeq: j.lastEventSeq.Load(),
+	}
+}
+
+// recordSeq advances the per-job event_seq high-water mark.
+func (j *Job) recordSeq(seq uint64) {
+	for {
+		cur := j.lastEventSeq.Load()
+		if seq <= cur || j.lastEventSeq.CompareAndSwap(cur, seq) {
+			return
+		}
 	}
 }
 
@@ -244,12 +266,19 @@ func (j *Job) emitTerminal(typ string, payload any) {
 	env.JobID = j.id
 	env.TraceID = j.traceID
 	env.EventSeq = j.session.nextSeq()
+	j.recordSeq(env.EventSeq)
 	j.session.send(env)
-	j.session.srv.fanoutEvent(j.ctx, j.id, env)
+	// Terminal fanout must not be gated by the job's own context, which
+	// is typically cancelled at (or just before) the terminal event, or
+	// subscribers could miss it (#82).
+	j.session.srv.fanoutEvent(context.Background(), j.id, env)
 }
 
 // run executes the agent body inside the job's context.
 func (j *Job) run() {
+	// Reclaim the job from the registry on completion so the jobs/subs
+	// maps do not grow unboundedly with terminal jobs (#81).
+	defer j.session.srv.unregisterJob(j.id)
 	if j.expiryTimer != nil {
 		defer j.expiryTimer.Stop()
 	}
@@ -257,6 +286,14 @@ func (j *Job) run() {
 	// leave the timer armed until its duration elapses (#80).
 	if j.runtimeTimer != nil {
 		defer j.runtimeTimer.Stop()
+	}
+	// Bail before reporting Running if the job is already terminal (an
+	// already-expired lease at construction time) (#79).
+	j.mu.Lock()
+	term := j.terminal
+	j.mu.Unlock()
+	if term {
+		return
 	}
 	j.setStatus(messages.StatusRunning)
 	jc := &JobContext{job: j}
@@ -408,6 +445,11 @@ func (j *Job) retryRevoke(id string, fn func(ctx context.Context) error) {
 		case <-done:
 		case <-ctx.Done():
 			timer.Stop()
+		}
+		// Exit the whole retry loop (not just the select) once the
+		// context is done, instead of calling Revoke on a dead ctx (#68).
+		if ctx.Err() != nil {
+			break
 		}
 	}
 	j.session.srv.opts.Logger.Error("credential revocation failed", "job_id", j.id, "credential_id", id, "err", err)

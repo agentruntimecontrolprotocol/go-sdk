@@ -78,12 +78,17 @@ func (e *Error) WithMessage(msg string) *Error {
 // WithDetails returns a copy of e with details merged into Details.
 func (e *Error) WithDetails(details map[string]any) *Error {
 	c := *e
-	if c.Details == nil {
-		c.Details = map[string]any{}
+	// Always allocate a fresh map so we never alias (and then mutate)
+	// the receiver's Details — important because the package-level
+	// sentinels are shared *Error values (#59).
+	merged := make(map[string]any, len(e.Details)+len(details))
+	for k, v := range e.Details {
+		merged[k] = v
 	}
 	for k, v := range details {
-		c.Details[k] = v
+		merged[k] = v
 	}
+	c.Details = merged
 	return &c
 }
 

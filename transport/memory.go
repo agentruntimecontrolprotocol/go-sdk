@@ -50,11 +50,10 @@ func (t *memoryTransport) Send(ctx context.Context, env arcp.Envelope) error {
 
 // Recv blocks for the next envelope.
 func (t *memoryTransport) Recv(ctx context.Context) (arcp.Envelope, error) {
+	// Close is signalled solely by the shared closed channel; the in
+	// channel is never closed, so there is no separate !ok branch.
 	select {
-	case env, ok := <-t.in:
-		if !ok {
-			return arcp.Envelope{}, ErrClosed
-		}
+	case env := <-t.in:
 		return env, nil
 	case <-t.closed:
 		return arcp.Envelope{}, ErrClosed

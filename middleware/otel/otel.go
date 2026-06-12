@@ -62,12 +62,17 @@ func (t *otelTransport) Send(ctx context.Context, env arcp.Envelope) error {
 		carrier := propagation.MapCarrier{}
 		t.opts.Propagator.Inject(ctx, carrier)
 		if len(carrier) > 0 {
-			if env.Extensions == nil {
-				env.Extensions = map[string]json.RawMessage{}
-			}
 			raw, err := json.Marshal(carrier)
 			if err == nil {
-				env.Extensions[ExtensionsKey] = raw
+				// Copy the caller-owned Extensions map before writing so
+				// the injected trace key does not leak back into the
+				// caller's envelope (which it may reuse or retain).
+				next := make(map[string]json.RawMessage, len(env.Extensions)+1)
+				for k, v := range env.Extensions {
+					next[k] = v
+				}
+				next[ExtensionsKey] = raw
+				env.Extensions = next
 			}
 		}
 		if env.TraceID == "" {
@@ -95,8 +100,9 @@ func (t *otelTransport) Send(ctx context.Context, env arcp.Envelope) error {
 //   - ToolCallSpans: one span per inbound job.event whose Kind is
 //     "tool_call" or "tool_result"
 //
-// All spans are started and ended immediately so they appear as
-// events on the active trace, not as long-running parents.
+// All spans are started and ended immediately, producing zero-duration
+// child spans (not OTel span events / AddEvent) rather than
+// long-running parents.
 func (t *otelTransport) Recv(ctx context.Context) (arcp.Envelope, error) {
 	env, err := t.inner.Recv(ctx)
 	if err != nil {
