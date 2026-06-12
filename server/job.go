@@ -229,8 +229,10 @@ func (j *Job) expireLease() {
 	}
 	j.session.srv.opts.Logger.Info("lease expired",
 		"job_id", j.id, "principal", j.principal, "agent", j.agent, "expires_at", expiresAt)
-	j.emitTerminalError(arcp.CodeLeaseExpired, "lease expired during execution")
+	// Revoke before notifying the client so the credential is already
+	// dead by the time the terminal event is observed (#157).
 	j.revokeAll()
+	j.emitTerminalError(arcp.CodeLeaseExpired, "lease expired during execution")
 	j.cancel()
 }
 
@@ -238,8 +240,8 @@ func (j *Job) timeout() {
 	if !j.markTerminal(messages.StatusTimedOut) {
 		return
 	}
-	j.emitTerminalError(arcp.CodeTimeout, "job exceeded max_runtime_sec")
 	j.revokeAll()
+	j.emitTerminalError(arcp.CodeTimeout, "job exceeded max_runtime_sec")
 	j.cancel()
 }
 
@@ -331,8 +333,10 @@ func (j *Job) run() {
 				Message:     reason,
 				Retryable:   false,
 			}
-			j.emitTerminal(messages.TypeJobError, &body)
+			// Revoke before notifying the client so the credential is
+			// already dead by the time the terminal event is observed (#157).
 			j.revokeAll()
+			j.emitTerminal(messages.TypeJobError, &body)
 		}
 		return
 	}
@@ -345,8 +349,8 @@ func (j *Job) run() {
 				Message:     err.Error(),
 				Retryable:   arcp.IsRetryable(err),
 			}
-			j.emitTerminal(messages.TypeJobError, &body)
 			j.revokeAll()
+			j.emitTerminal(messages.TypeJobError, &body)
 		}
 		return
 	}
@@ -361,8 +365,8 @@ func (j *Job) run() {
 			ResultID:    jc.streamed.resultID,
 			ResultSize:  jc.streamed.size,
 		}
-		j.emitTerminal(messages.TypeJobResult, &final)
 		j.revokeAll()
+		j.emitTerminal(messages.TypeJobResult, &final)
 		return
 	}
 	if !j.markTerminal(messages.StatusSuccess) {
@@ -381,14 +385,14 @@ func (j *Job) run() {
 				Message:     "marshal result: " + mErr.Error(),
 				Retryable:   true,
 			}
-			j.emitTerminal(messages.TypeJobError, &ebody)
 			j.revokeAll()
+			j.emitTerminal(messages.TypeJobError, &ebody)
 			return
 		}
 		body.Output = raw
 	}
-	j.emitTerminal(messages.TypeJobResult, &body)
 	j.revokeAll()
+	j.emitTerminal(messages.TypeJobResult, &body)
 }
 
 func (j *Job) revokeAll() {
